@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"net"
+	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,14 +13,14 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/incusd/instance/instancetype"
-	config "github.com/lxc/incus/internal/cliconfig"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/units"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/internal/instance"
+	"github.com/lxc/incus/v6/shared/api"
+	config "github.com/lxc/incus/v6/shared/cliconfig"
+	"github.com/lxc/incus/v6/shared/units"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 type column struct {
@@ -107,6 +109,7 @@ Pre-defined column shorthand chars:
   S - Number of snapshots
   t - Type (persistent or ephemeral)
   u - CPU usage (in seconds)
+  U - Started date
   L - Location of the instance (e.g. its cluster member)
   f - Base Image Fingerprint (short)
   F - Base Image Fingerprint (long)
@@ -130,9 +133,21 @@ incus list -c ns,user.comment:comment
 
 	cmd.RunE = c.Run
 	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", defaultColumns, i18n.G("Columns")+"``")
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
 	cmd.Flags().BoolVar(&c.flagFast, "fast", false, i18n.G("Fast mode (same as --columns=nsacPt)"))
 	cmd.Flags().BoolVar(&c.flagAllProjects, "all-projects", false, i18n.G("Display instances from all projects"))
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpRemotes(toComplete, false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -443,7 +458,7 @@ func (c *cmdList) showInstances(instances []api.InstanceFull, filters []string, 
 		headers = append(headers, column.Name)
 	}
 
-	return cli.RenderTable(c.flagFormat, headers, data, instancesFiltered)
+	return cli.RenderTable(os.Stdout, c.flagFormat, headers, data, instancesFiltered)
 }
 
 func (c *cmdList) Run(cmd *cobra.Command, args []string) error {
@@ -498,6 +513,14 @@ func (c *cmdList) Run(cmd *cobra.Command, args []string) error {
 	columns, needsData, err := c.parseColumns(d.IsClustered())
 	if err != nil {
 		return err
+	}
+
+	// Support for alternative filter names.
+	for i, filter := range filters {
+		fields := strings.SplitN(filter, "=", 2)
+		if len(fields) == 2 && fields[0] == "state" {
+			filters[i] = fmt.Sprintf("status=%s", fields[1])
+		}
 	}
 
 	if needsData && d.HasExtension("container_full") {
@@ -570,6 +593,7 @@ func (c *cmdList) parseColumns(clustered bool) ([]column, bool, error) {
 		's': {i18n.G("STATE"), c.statusColumnData, false, false},
 		't': {i18n.G("TYPE"), c.typeColumnData, false, false},
 		'u': {i18n.G("CPU USAGE"), c.cpuUsageSecondsColumnData, true, false},
+		'U': {i18n.G("STARTED AT"), c.startedColumnData, true, false},
 	}
 
 	// Add project column if --all-projects flag specified and
@@ -643,7 +667,7 @@ func (c *cmdList) parseColumns(clustered bool) ([]column, bool, error) {
 
 			k := cc[0]
 			if colType == configColumnType {
-				_, err := shared.ConfigKeyChecker(k, instancetype.Any)
+				_, err := instance.ConfigKeyChecker(k, api.InstanceTypeAny)
 				if err != nil {
 					return nil, false, fmt.Errorf(i18n.G("Invalid config key '%s' in '%s'"), k, columnEntry)
 				}
@@ -765,7 +789,7 @@ func (c *cmdList) IP4ColumnData(cInfo api.InstanceFull) string {
 			}
 
 			for _, addr := range net.Addresses {
-				if shared.StringInSlice(addr.Scope, []string{"link", "local"}) {
+				if slices.Contains([]string{"link", "local"}, addr.Scope) {
 					continue
 				}
 
@@ -791,7 +815,7 @@ func (c *cmdList) IP6ColumnData(cInfo api.InstanceFull) string {
 			}
 
 			for _, addr := range net.Addresses {
-				if shared.StringInSlice(addr.Scope, []string{"link", "local"}) {
+				if slices.Contains([]string{"link", "local"}, addr.Scope) {
 					continue
 				}
 
@@ -848,7 +872,7 @@ func (c *cmdList) cpuUsageSecondsColumnData(cInfo api.InstanceFull) string {
 }
 
 func (c *cmdList) diskUsageColumnData(cInfo api.InstanceFull) string {
-	rootDisk, _, _ := shared.GetRootDiskDevice(cInfo.ExpandedDevices)
+	rootDisk, _, _ := instance.GetRootDiskDevice(cInfo.ExpandedDevices)
 
 	if cInfo.State != nil && cInfo.State.Disk != nil && cInfo.State.Disk[rootDisk].Usage > 0 {
 		return units.GetByteSizeStringIEC(cInfo.State.Disk[rootDisk].Usage, 2)
@@ -858,15 +882,21 @@ func (c *cmdList) diskUsageColumnData(cInfo api.InstanceFull) string {
 }
 
 func (c *cmdList) typeColumnData(cInfo api.InstanceFull) string {
-	if cInfo.Type == "" {
-		cInfo.Type = "container"
+	ret := strings.ToUpper(cInfo.Type)
+
+	if ret == "" {
+		ret = "CONTAINER"
+	}
+
+	if util.IsTrue(cInfo.ExpandedConfig["volatile.container.oci"]) {
+		ret = fmt.Sprintf("%s (%s)", ret, i18n.G("APP"))
 	}
 
 	if cInfo.Ephemeral {
-		return fmt.Sprintf("%s (%s)", strings.ToUpper(cInfo.Type), i18n.G("EPHEMERAL"))
+		ret = fmt.Sprintf("%s (%s)", ret, i18n.G("EPHEMERAL"))
 	}
 
-	return strings.ToUpper(cInfo.Type)
+	return ret
 }
 
 func (c *cmdList) numberSnapshotsColumnData(cInfo api.InstanceFull) string {
@@ -904,20 +934,24 @@ func (c *cmdList) ProfilesColumnData(cInfo api.InstanceFull) string {
 }
 
 func (c *cmdList) CreatedColumnData(cInfo api.InstanceFull) string {
-	layout := "2006/01/02 15:04 UTC"
+	if !cInfo.CreatedAt.IsZero() {
+		return cInfo.CreatedAt.Local().Format(dateLayout)
+	}
 
-	if shared.TimeIsSet(cInfo.CreatedAt) {
-		return cInfo.CreatedAt.UTC().Format(layout)
+	return ""
+}
+
+func (c *cmdList) startedColumnData(cInfo api.InstanceFull) string {
+	if cInfo.State != nil && !cInfo.State.StartedAt.IsZero() {
+		return cInfo.State.StartedAt.Local().Format(dateLayout)
 	}
 
 	return ""
 }
 
 func (c *cmdList) LastUsedColumnData(cInfo api.InstanceFull) string {
-	layout := "2006/01/02 15:04 UTC"
-
-	if !cInfo.LastUsedAt.IsZero() && shared.TimeIsSet(cInfo.LastUsedAt) {
-		return cInfo.LastUsedAt.UTC().Format(layout)
+	if !cInfo.LastUsedAt.IsZero() {
+		return cInfo.LastUsedAt.Local().Format(dateLayout)
 	}
 
 	return ""
@@ -1003,6 +1037,7 @@ func (c *cmdList) matchByIPV4(cInfo *api.Instance, cState *api.InstanceState, qu
 func (c *cmdList) mapShorthandFilters() {
 	c.shorthandFilters = map[string]func(*api.Instance, *api.InstanceState, string) bool{
 		"type":         c.matchByType,
+		"state":        c.matchByStatus,
 		"status":       c.matchByStatus,
 		"architecture": c.matchByArchitecture,
 		"location":     c.matchByLocation,

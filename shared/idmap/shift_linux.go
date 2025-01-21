@@ -20,12 +20,12 @@ package idmap
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include "../../incusd/include/incus_posix_acl_xattr.h"
-#include "../../incusd/include/memory_utils.h"
-#include "../../incusd/include/mount_utils.h"
-#include "../../incusd/include/process_utils.h"
-#include "../../incusd/include/syscall_numbers.h"
-#include "../../incusd/include/syscall_wrappers.h"
+#include "../../shared/cgo/incus_posix_acl_xattr.h"
+#include "../../shared/cgo/memory_utils.h"
+#include "../../shared/cgo/mount_utils.h"
+#include "../../shared/cgo/process_utils.h"
+#include "../../shared/cgo/syscall_numbers.h"
+#include "../../shared/cgo/syscall_wrappers.h"
 
 // Needs to be included at the end
 #include <sys/acl.h>
@@ -279,19 +279,78 @@ static int get_userns_fd_cb(void *data)
 
 static int get_userns_fd(void)
 {
-	int ret;
+	int userns_fd = -EBADF;
+	int file_fd = -EBADF;
 	pid_t pid;
 	char path[256];
 
+	// Create the namespace.
 	pid = do_clone(get_userns_fd_cb, NULL, CLONE_NEWUSER);
 	if (pid < 0)
-		return -errno;
+		goto err;
 
+	// Fetch a reference.
 	snprintf(path, sizeof(path), "/proc/%d/ns/user", pid);
-	ret = open(path, O_RDONLY | O_CLOEXEC);
+	userns_fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (userns_fd < 0)
+		goto err_process;
+
+	// Setup uid_map
+	snprintf(path, sizeof(path), "/proc/%d/uid_map", pid);
+	file_fd = openat(AT_FDCWD, path, O_WRONLY);
+	if (file_fd < 0)
+		goto err_process;
+
+	if (write(file_fd, "0 0 1", 5) != 5)
+		goto err_process;
+
+	if (close(file_fd) < 0) {
+		file_fd = -EBADF;
+		goto err_process;
+	}
+
+	// Setup setgroups
+	snprintf(path, sizeof(path), "/proc/%d/setgroups", pid);
+	file_fd = openat(AT_FDCWD, path, O_WRONLY);
+	if (file_fd < 0)
+		goto err_process;
+
+	if (write(file_fd, "deny", 4) != 4)
+		goto err_process;
+
+	if (close(file_fd) < 0) {
+		file_fd = -EBADF;
+		goto err_process;
+	}
+
+	// Setup gid_map
+	snprintf(path, sizeof(path), "/proc/%d/gid_map", pid);
+	file_fd = openat(AT_FDCWD, path, O_WRONLY);
+	if (file_fd < 0)
+		goto err_process;
+
+	if (write(file_fd, "0 0 1", 5) != 5)
+		goto err_process;
+
+	if (close(file_fd) < 0) {
+		file_fd = -EBADF;
+		goto err_process;
+	}
+
+	// Kill the temporary process.
 	kill(pid, SIGKILL);
 	wait_for_pid(pid);
-	return ret;
+
+	return userns_fd;
+
+err_process:
+	kill(pid, SIGKILL);
+	wait_for_pid(pid);
+
+err:
+	close(userns_fd);
+	close(file_fd);
+	return -1;
 }
 
 static int create_detached_idmapped_mount(const char *path, const char *fstype)
@@ -348,12 +407,11 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	_ "github.com/lxc/incus/incusd/include" // Used by cgo
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/logger"
+	_ "github.com/lxc/incus/v6/shared/cgo" // Used by cgo
+	"github.com/lxc/incus/v6/shared/logger"
 )
 
-// ShiftOwner updates uid and gid for a file when entering/exiting a namespace
+// ShiftOwner updates the uid and gid for a file within a specific basepath.
 func ShiftOwner(basepath string, path string, uid int, gid int) error {
 	cbasepath := C.CString(basepath)
 	defer C.free(unsafe.Pointer(cbasepath))
@@ -369,9 +427,9 @@ func ShiftOwner(basepath string, path string, uid int, gid int) error {
 	return nil
 }
 
-// GetCaps extracts the list of capabilities effective on the file
+// GetCaps extracts the list of capabilities effective on the file.
 func GetCaps(path string) ([]byte, error) {
-	xattrs, err := shared.GetAllXattr(path)
+	xattrs, err := getAllXattr(path)
 	if err != nil {
 		return nil, err
 	}
@@ -384,7 +442,7 @@ func GetCaps(path string) ([]byte, error) {
 	return []byte(valueStr), nil
 }
 
-// SetCaps applies the caps for a particular root uid
+// SetCaps applies the caps for a particular root uid.
 func SetCaps(path string, caps []byte, uid int64) error {
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
@@ -400,7 +458,7 @@ func SetCaps(path string, caps []byte, uid int64) error {
 	return nil
 }
 
-// ShiftACL updates uid and gid for file ACLs when entering/exiting a namespace
+// ShiftACL updates the uid and gid for ACL entries through the provided mapper function.
 func ShiftACL(path string, shiftIds func(uid int64, gid int64) (int64, int64)) error {
 	err := shiftAclType(path, C.ACL_TYPE_ACCESS, shiftIds)
 	if err != nil {
@@ -487,7 +545,8 @@ func shiftAclType(path string, aclType int, shiftIds func(uid int64, gid int64) 
 	return nil
 }
 
-func SupportsVFS3Fscaps(prefix string) bool {
+// SupportsVFS3FSCaps checks whether the kernel supports VFS v3 fscaps.
+func SupportsVFS3FSCaps(prefix string) bool {
 	tmpfile, err := os.CreateTemp(prefix, ".incus_fcaps_v3_")
 	if err != nil {
 		return false
@@ -512,7 +571,7 @@ func SupportsVFS3Fscaps(prefix string) bool {
 	cmd := exec.Command(tmpfile.Name())
 	err = cmd.Run()
 	if err != nil {
-		errno, isErrno := shared.GetErrno(err)
+		errno, isErrno := getErrno(err)
 		if isErrno && (errno == unix.ERANGE || errno == unix.EOVERFLOW) {
 			return false
 		}
@@ -523,9 +582,10 @@ func SupportsVFS3Fscaps(prefix string) bool {
 	return true
 }
 
-func UnshiftACL(value string, set *IdmapSet) (string, error) {
+// UnshiftACL unshifts the uid/gid in the raw ACL entry.
+func UnshiftACL(value string, set *Set) (string, error) {
 	if set == nil {
-		return "", fmt.Errorf("Invalid IdmapSet supplied")
+		return "", fmt.Errorf("Invalid Set supplied")
 	}
 
 	buf := []byte(value)
@@ -558,7 +618,7 @@ func UnshiftACL(value string, set *IdmapSet) (string, error) {
 		switch C.le16_to_native(entry.e_tag) {
 		case C.ACL_USER:
 			ouid := int64(C.le32_to_native(entry.e_id))
-			uid, _ := set.ShiftFromNs(ouid, -1)
+			uid, _ := set.ShiftFromNS(ouid, -1)
 			if int(uid) != -1 {
 				entry.e_id = C.native_to_le32(C.int(uid))
 				logger.Debugf("Unshifting ACL_USER from uid %d to uid %d", ouid, uid)
@@ -566,7 +626,7 @@ func UnshiftACL(value string, set *IdmapSet) (string, error) {
 
 		case C.ACL_GROUP:
 			ogid := int64(C.le32_to_native(entry.e_id))
-			_, gid := set.ShiftFromNs(-1, ogid)
+			_, gid := set.ShiftFromNS(-1, ogid)
 			if int(gid) != -1 {
 				entry.e_id = C.native_to_le32(C.int(gid))
 				logger.Debugf("Unshifting ACL_GROUP from gid %d to gid %d", ogid, gid)
@@ -592,9 +652,10 @@ func UnshiftACL(value string, set *IdmapSet) (string, error) {
 	return string(buf), nil
 }
 
-func UnshiftCaps(value string, set *IdmapSet) (string, error) {
+// UnshiftCaps unshifts the uid/gid in the raw fscaps.
+func UnshiftCaps(value string, set *Set) (string, error) {
 	if set == nil {
-		return "", fmt.Errorf("Invalid IdmapSet supplied")
+		return "", fmt.Errorf("Invalid Set supplied")
 	}
 
 	buf := []byte(value)
@@ -608,7 +669,7 @@ func UnshiftCaps(value string, set *IdmapSet) (string, error) {
 		return value, nil
 	}
 
-	uid, _ := set.ShiftFromNs(int64(ouid), -1)
+	uid, _ := set.ShiftFromNS(int64(ouid), -1)
 	if int(uid) != -1 {
 		C.update_vfs_ns_caps_uid(cBuf, size, &nsXattr, C.uid_t(uid))
 		logger.Debugf("Unshifting vfs capabilities from uid %d to uid %d", ouid, uid)

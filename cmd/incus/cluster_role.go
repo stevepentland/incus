@@ -2,12 +2,13 @@ package main
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/shared"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 type cmdClusterRole struct {
@@ -52,6 +53,14 @@ func (c *cmdClusterRoleAdd) Command() *cobra.Command {
 
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpClusterMembers(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -80,9 +89,9 @@ func (c *cmdClusterRoleAdd) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	memberWritable := member.Writable()
-	newRoles := shared.SplitNTrimSpace(args[1], ",", -1, false)
+	newRoles := util.SplitNTrimSpace(args[1], ",", -1, false)
 	for _, newRole := range newRoles {
-		if shared.StringInSlice(newRole, memberWritable.Roles) {
+		if slices.Contains(memberWritable.Roles, newRole) {
 			return fmt.Errorf(i18n.G("Member %q already has role %q"), resource.name, newRole)
 		}
 	}
@@ -107,6 +116,18 @@ func (c *cmdClusterRoleRemove) Command() *cobra.Command {
 		`Remove roles from a cluster member`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpClusterMembers(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpClusterMemberRoles(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -136,14 +157,14 @@ func (c *cmdClusterRoleRemove) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	memberWritable := member.Writable()
-	rolesToRemove := shared.SplitNTrimSpace(args[1], ",", -1, false)
+	rolesToRemove := util.SplitNTrimSpace(args[1], ",", -1, false)
 	for _, roleToRemove := range rolesToRemove {
-		if !shared.StringInSlice(roleToRemove, memberWritable.Roles) {
+		if !slices.Contains(memberWritable.Roles, roleToRemove) {
 			return fmt.Errorf(i18n.G("Member %q does not have role %q"), resource.name, roleToRemove)
 		}
 	}
 
-	memberWritable.Roles = shared.RemoveElementsFromStringSlice(memberWritable.Roles, rolesToRemove...)
+	memberWritable.Roles = removeElementsFromSlice(memberWritable.Roles, rolesToRemove...)
 
 	return resource.server.UpdateClusterMember(resource.name, memberWritable, etag)
 }

@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	config "github.com/lxc/incus/internal/cliconfig"
+	config "github.com/lxc/incus/v6/shared/cliconfig"
 )
 
 type aliasTestcase struct {
@@ -84,12 +84,22 @@ func TestExpandAliases(t *testing.T) {
 			input:    []string{"incus", "snapshots", "with", "recursion", "c1", "2"},
 			expected: []string{"incus", "query", "/1.0/instances/c1/snapshots?recursion=2"},
 		},
+		{
+			input:    []string{"incus", "--project", "default", "fizz", "c1", "buzz"},
+			expected: []string{"incus", "--project", "default", "exec", "c1", "--", "echo", "buzz"},
+		},
+		{
+			input:    []string{"incus", "--project=default", "fizz", "c1", "buzz"},
+			expected: []string{"incus", "--project=default", "exec", "c1", "--", "echo", "buzz"},
+		},
 	}
 
 	conf := &config.Config{Aliases: aliases}
 
 	for _, tc := range testcases {
-		result, expanded, err := expandAlias(conf, tc.input)
+		app, _ := createApp()
+		_ = app.ParseFlags(tc.input[1:])
+		result, expanded, err := expandAlias(conf, tc.input, app)
 		if tc.expectErr {
 			assert.Error(t, err)
 			continue

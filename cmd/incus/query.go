@@ -8,14 +8,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
 )
 
 type cmdQuery struct {
@@ -73,7 +73,7 @@ func (c *cmdQuery) Run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf(i18n.G("--project cannot be used with the query command"))
 	}
 
-	if !shared.StringInSlice(c.flagAction, []string{"GET", "PUT", "POST", "PATCH", "DELETE"}) {
+	if !slices.Contains([]string{"GET", "PUT", "POST", "PATCH", "DELETE"}, c.flagAction) {
 		return fmt.Errorf(i18n.G("Action %q isn't supported by this tool"), c.flagAction)
 	}
 
@@ -109,6 +109,11 @@ func (c *cmdQuery) Run(cmd *cobra.Command, args []string) error {
 
 		// If not JSON decoding error then fail immediately.
 		if !errors.As(err, &jsonSyntaxError) && !errors.As(err, &jsonUnmarshalTypeError) && err.Error() != "EOF" {
+			if c.flagRespRaw && resp != nil {
+				fmt.Println(c.pretty(resp))
+				return nil
+			}
+
 			return err
 		}
 

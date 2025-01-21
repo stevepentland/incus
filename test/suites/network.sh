@@ -4,6 +4,18 @@ test_network() {
 
   incus init testimage nettest
 
+  # Test DNS resolution of instance names
+  incus network create inct$$
+  incus launch testimage 0abc -n inct$$
+  incus launch testimage def0 -n inct$$
+  v4_addr="$(incus network get inct$$ ipv4.address | cut -d/ -f1)"
+  sleep 2
+  dig @"${v4_addr}" 0abc.incus
+  dig @"${v4_addr}" def0.incus
+  incus delete -f 0abc
+  incus delete -f def0
+  incus network delete inct$$
+
   # Standard bridge with random subnet and a bunch of options
   incus network create inct$$
   incus network set inct$$ dns.mode dynamic
@@ -37,8 +49,11 @@ test_network() {
   incus network delete inct$$
 
   # edit network description
-  incus network create inct$$
+  incus network create inct$$ --description "Test description"
+  incus network list | grep -q 'Test description'
+  incus network show inct$$ | grep -q 'description: Test description'
   incus network show inct$$ | sed 's/^description:.*/description: foo/' | incus network edit inct$$
+  incus network list | grep -q 'foo'
   incus network show inct$$ | grep -q 'description: foo'
   incus network delete inct$$
 
@@ -83,6 +98,9 @@ test_network() {
   incus network list-allocations | grep -e "${net_ipv4}" -e "${net_ipv6}"
   incus network list-allocations | grep -e "/1.0/networks/inct$$" -e "/1.0/instances/nettest"
   incus network list-allocations | grep -e "${v4_addr}" -e "${v6_addr}"
+  incus network list-allocations localhost: | grep -e "${net_ipv4}" -e "${net_ipv6}"
+  incus network list-allocations localhost: | grep -e "/1.0/networks/inct$$" -e "/1.0/instances/nettest"
+  incus network list-allocations localhost: | grep -e "${v4_addr}" -e "${v6_addr}"
 
   incus delete nettest -f
   incus network delete inct$$

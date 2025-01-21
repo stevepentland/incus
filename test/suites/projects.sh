@@ -60,12 +60,18 @@ test_projects_crud() {
 
   incus project switch default
 
+  # Create a project with a description
+  incus project create baz --description "Test description"
+  incus project list | grep -q -F 'Test description'
+  incus project show baz | grep -q -F 'description: Test description'
+
   # Delete the projects
   incus project delete foo
   incus project delete bar
+  incus project delete baz
 
   # We're back to the default project
-  incus project list | grep -q "default (current)"
+  [ "$(incus project get-current)" = "default" ]
 }
 
 # Use containers in a project.
@@ -207,7 +213,7 @@ test_projects_snapshots() {
   incus config show c1/snap0 | grep -q BusyBox
   incus snapshot rename c1 snap0 foo
   incus snapshot restore c1 foo
-  incus snapshot delete c1/foo
+  incus snapshot delete c1 foo
 
   # Test copies
   incus snapshot create c1
@@ -521,7 +527,7 @@ test_projects_network() {
   # Create a container in the project
   incus init -n "${network}" testimage c1
 
-  incus network show "${network}" |grep -q "/1.0/instances/c1?project=foo"
+  incus network show "${network}" | grep -q "/1.0/instances/c1?project=foo"
 
   # Delete the container
   incus delete c1
@@ -549,6 +555,43 @@ test_projects_limits() {
   incus profile device add default root disk path="/" pool="${pool}"
 
   deps/import-busybox --project p1 --alias testimage
+
+  # Test per-pool limits.
+  incus storage create limit1 dir
+  incus storage create limit2 dir
+
+  incus project set p1 limits.disk=50MiB
+  incus project set p1 limits.disk.pool.limit1=0
+  incus project set p1 limits.disk.pool.limit2=0
+
+  ! incus storage list | grep -q limit1 || false
+  ! incus storage list | grep -q limit2 || false
+
+  incus storage volume create "${pool}" foo size=10MiB
+  ! incus storage volume create "${pool}" bar size=50MiB || false
+  incus storage volume delete "${pool}" foo
+
+  ! incus storage volume create limit1 foo size=10GiB || false
+  ! incus storage volume create limit2 foo size=10GiB || false
+
+  incus project set p1 limits.disk.pool.limit1=10MiB
+  incus project set p1 limits.disk.pool.limit2=10MiB
+  incus storage volume create limit1 foo size=10MiB
+  ! incus storage volume create limit1 bar size=10MiB || false
+  incus storage volume create limit2 foo size=10MiB
+  ! incus storage volume create limit2 bar size=10MiB || false
+
+  ! incus storage volume create "${pool}" foo size=40MiB || false
+  incus storage volume delete limit1 foo
+  incus storage volume delete limit2 foo
+  incus storage volume create "${pool}" foo size=40MiB
+
+  incus storage volume delete "${pool}" foo
+  incus project unset p1 limits.disk.pool.limit1
+  incus project unset p1 limits.disk.pool.limit2
+  incus project unset p1 limits.disk
+  incus storage delete limit1
+  incus storage delete limit2
 
   # Create a couple of containers in the project.
   incus init testimage c1
@@ -754,7 +797,8 @@ test_projects_limits() {
     INCUS_REMOTE_ADDR=$(cat "${INCUS_REMOTE_DIR}/incus.addr")
     (INCUS_DIR=${INCUS_REMOTE_DIR} deps/import-busybox --alias remoteimage --template start --public)
 
-    incus remote add l2 "${INCUS_REMOTE_ADDR}" --accept-certificate --password foo
+    token="$(INCUS_DIR=${INCUS_REMOTE_DIR} incus config trust add foo -q)"
+    incus remote add l2 "${INCUS_REMOTE_ADDR}" --accept-certificate --token "${token}"
 
     # Relax all constraints except the disk limits, which won't be enough for the
     # image to be downloaded.
@@ -1029,7 +1073,7 @@ test_projects_usage() {
     limits.cpu=1 \
     limits.memory=512MiB \
     limits.processes=20
-  incus profile device set default root size=3GiB --project test-usage
+  incus profile device set default root size=300MiB --project test-usage
 
   # Spin up a container
   deps/import-busybox --project test-usage --alias testimage
@@ -1038,7 +1082,7 @@ test_projects_usage() {
 
   incus project info test-usage --format csv | grep -q "CONTAINERS,UNLIMITED,1"
   incus project info test-usage --format csv | grep -q "CPU,5,1"
-  incus project info test-usage --format csv | grep -q "DISK,10.00GiB,3.00GiB"
+  incus project info test-usage --format csv | grep -q "DISK,10.00GiB,300.00MiB"
   incus project info test-usage --format csv | grep -q "INSTANCES,UNLIMITED,1"
   incus project info test-usage --format csv | grep -q "MEMORY,1.00GiB,512.00MiB"
   incus project info test-usage --format csv | grep -q "NETWORKS,3,0"

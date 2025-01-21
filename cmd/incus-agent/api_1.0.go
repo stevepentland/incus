@@ -10,14 +10,16 @@ import (
 
 	"github.com/mdlayher/vsock"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/incusd/response"
-	localvsock "github.com/lxc/incus/incusd/vsock"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	agentAPI "github.com/lxc/incus/shared/api/agent"
-	"github.com/lxc/incus/shared/logger"
-	"github.com/lxc/incus/shared/version"
+	incus "github.com/lxc/incus/v6/client"
+	"github.com/lxc/incus/v6/internal/linux"
+	"github.com/lxc/incus/v6/internal/ports"
+	"github.com/lxc/incus/v6/internal/server/response"
+	localvsock "github.com/lxc/incus/v6/internal/server/vsock"
+	"github.com/lxc/incus/v6/internal/version"
+	"github.com/lxc/incus/v6/shared/api"
+	agentAPI "github.com/lxc/incus/v6/shared/api/agent"
+	"github.com/lxc/incus/v6/shared/logger"
+	localtls "github.com/lxc/incus/v6/shared/tls"
 )
 
 var api10Cmd = APIEndpoint{
@@ -33,6 +35,7 @@ var api10 = []APIEndpoint{
 	operationsCmd,
 	operationCmd,
 	operationWebsocket,
+	operationWait,
 	sftpCmd,
 	stateCmd,
 }
@@ -44,10 +47,10 @@ func api10Get(d *Daemon, r *http.Request) response.Response {
 		APIVersion:    version.APIVersion,
 		Public:        false,
 		Auth:          "trusted",
-		AuthMethods:   []string{"tls"},
+		AuthMethods:   []string{api.AuthenticationMethodTLS},
 	}
 
-	uname, err := shared.Uname()
+	uname, err := linux.Uname()
 	if err != nil {
 		return response.InternalError(err)
 	}
@@ -168,7 +171,11 @@ func stopDevIncusServer(d *Daemon) error {
 	d.DevIncusRunning = false
 	d.DevIncusMu.Unlock()
 
-	return servers["DevIncus"].Close()
+	if servers["DevIncus"] != nil {
+		return servers["DevIncus"].Close()
+	}
+
+	return nil
 }
 
 func getClient(CID uint32, port int, serverCertificate string) (*http.Client, error) {
@@ -191,8 +198,13 @@ func getClient(CID uint32, port int, serverCertificate string) (*http.Client, er
 }
 
 func startHTTPServer(d *Daemon, debug bool) error {
-	// Setup the listener on VM's context ID for inbound connections from the host.
-	l, err := vsock.Listen(shared.HTTPSDefaultPort, nil)
+	const CIDAny uint32 = 4294967295 // Equivalent to VMADDR_CID_ANY.
+
+	// Setup the listener on wildcard CID for inbound connections from Incus.
+	// We use the VMADDR_CID_ANY CID so that if the VM's CID changes in the future the listener still works.
+	// A CID change can occur when restoring a stateful VM that was previously using one CID but is
+	// subsequently restored using a different one.
+	l, err := vsock.ListenContextID(CIDAny, ports.HTTPSDefaultPort, nil)
 	if err != nil {
 		return fmt.Errorf("Failed to listen on vsock: %w", err)
 	}
@@ -200,7 +212,7 @@ func startHTTPServer(d *Daemon, debug bool) error {
 	logger.Info("Started vsock listener")
 
 	// Load the expected server certificate.
-	cert, err := shared.ReadCert("server.crt")
+	cert, err := localtls.ReadCert("server.crt")
 	if err != nil {
 		return fmt.Errorf("Failed to read client certificate: %w", err)
 	}

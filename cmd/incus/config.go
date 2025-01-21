@@ -9,12 +9,12 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/termios"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/internal/instance"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/termios"
 )
 
 type cmdConfig struct {
@@ -100,6 +100,14 @@ func (c *cmdConfigEdit) Command() *cobra.Command {
 
 	cmd.Flags().StringVar(&c.config.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -233,7 +241,7 @@ func (c *cmdConfigEdit) Run(cmd *cobra.Command, args []string) error {
 		}
 
 		// Spawn the editor
-		content, err := shared.TextEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
+		content, err := textEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
 		if err != nil {
 			return err
 		}
@@ -273,7 +281,7 @@ func (c *cmdConfigEdit) Run(cmd *cobra.Command, args []string) error {
 					return err
 				}
 
-				content, err = shared.TextEditor("", content)
+				content, err = textEditor("", content)
 				if err != nil {
 					return err
 				}
@@ -325,7 +333,7 @@ func (c *cmdConfigEdit) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Spawn the editor
-	content, err := shared.TextEditor("", data)
+	content, err := textEditor("", data)
 	if err != nil {
 		return err
 	}
@@ -348,7 +356,7 @@ func (c *cmdConfigEdit) Run(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			content, err = shared.TextEditor("", content)
+			content, err = textEditor("", content)
 			if err != nil {
 				return err
 			}
@@ -384,6 +392,18 @@ func (c *cmdConfigGet) Command() *cobra.Command {
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Get the key as an instance property"))
 	cmd.Flags().StringVar(&c.config.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpInstanceAllKeys()
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -483,14 +503,6 @@ func (c *cmdConfigGet) Run(cmd *cobra.Command, args []string) error {
 		}
 
 		value := resp.Config[args[len(args)-1]]
-		if value == nil {
-			value = ""
-		} else if value == true {
-			value = "true"
-		} else if value == false {
-			value = "false"
-		}
-
 		fmt.Println(value)
 	}
 
@@ -520,14 +532,23 @@ For backward compatibility, a single configuration key may still be set with:
     Will set a CPU limit of "2" for the instance.
 
 incus config set core.https_address=[::]:8443
-    Will have the server listen on IPv4 and IPv6 port 8443.
-
-incus config set core.trust_password=blah
-    Will set the server's trust password to blah.`))
+    Will have the server listen on IPv4 and IPv6 port 8443.`))
 
 	cmd.Flags().StringVar(&c.config.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Set the key as an instance property"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpInstanceAllKeys()
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -704,7 +725,7 @@ func (c *cmdConfigSet) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	if server.Config == nil {
-		server.Config = map[string]any{}
+		server.Config = map[string]string{}
 	}
 
 	for k, v := range keys {
@@ -733,6 +754,14 @@ func (c *cmdConfigShow) Command() *cobra.Command {
 	cmd.Flags().BoolVarP(&c.flagExpanded, "expanded", "e", false, i18n.G("Show the expanded configuration"))
 	cmd.Flags().StringVar(&c.config.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) != 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		return c.global.cmpInstances(toComplete)
+	}
 
 	return cmd
 }
@@ -796,9 +825,9 @@ func (c *cmdConfigShow) Run(cmd *cobra.Command, args []string) error {
 		// Instance or snapshot config
 		var brief any
 
-		if shared.IsSnapshot(resource.name) {
+		if instance.IsSnapshot(resource.name) {
 			// Snapshot
-			fields := strings.Split(resource.name, shared.SnapshotDelimiter)
+			fields := strings.Split(resource.name, instance.SnapshotDelimiter)
 
 			snap, _, err := resource.server.GetInstanceSnapshot(fields[0], fields[1])
 			if err != nil {
@@ -857,6 +886,18 @@ func (c *cmdConfigUnset) Command() *cobra.Command {
 	cmd.Flags().StringVar(&c.config.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Unset the key as an instance property"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpInstanceAllKeys()
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }

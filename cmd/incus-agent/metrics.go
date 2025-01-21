@@ -8,14 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/lxc/incus/incusd/metrics"
-	"github.com/lxc/incus/incusd/response"
-	"github.com/lxc/incus/incusd/storage/filesystem"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/logger"
+	"github.com/lxc/incus/v6/internal/linux"
+	"github.com/lxc/incus/v6/internal/server/metrics"
+	"github.com/lxc/incus/v6/internal/server/response"
+	"github.com/lxc/incus/v6/shared/logger"
 )
 
 // These mountpoints are excluded as they are irrelevant for metrics.
@@ -76,22 +76,28 @@ func metricsGet(d *Daemon, r *http.Request) response.Response {
 	return response.SyncResponse(true, &out)
 }
 
-func getCPUMetrics(d *Daemon) (map[string]metrics.CPUMetrics, error) {
+func getCPUMetrics(d *Daemon) ([]metrics.CPUMetrics, error) {
 	stats, err := os.ReadFile("/proc/stat")
 	if err != nil {
 		return nil, fmt.Errorf("Failed to read /proc/stat: %w", err)
 	}
 
-	out := map[string]metrics.CPUMetrics{}
+	out := []metrics.CPUMetrics{}
 	scanner := bufio.NewScanner(bytes.NewReader(stats))
 
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
+		line := scanner.Text()
+		fields := strings.Fields(line)
 
 		// Only consider CPU info, skip everything else. Skip aggregated CPU stats since there will
 		// be stats for each individual CPU.
 		if !strings.HasPrefix(fields[0], "cpu") || fields[0] == "cpu" {
 			continue
+		}
+
+		// Validate the number of fields only for lines starting with "cpu".
+		if len(fields) < 9 {
+			return nil, fmt.Errorf("Invalid /proc/stat content: %q", line)
 		}
 
 		stats := metrics.CPUMetrics{}
@@ -152,7 +158,8 @@ func getCPUMetrics(d *Daemon) (map[string]metrics.CPUMetrics, error) {
 
 		stats.SecondsSteal /= 100
 
-		out[fields[0]] = stats
+		stats.CPU = fields[0]
+		out = append(out, stats)
 	}
 
 	return out, nil
@@ -197,13 +204,13 @@ func getTotalProcesses(d *Daemon) (uint64, error) {
 	return pidCount, nil
 }
 
-func getDiskMetrics(d *Daemon) (map[string]metrics.DiskMetrics, error) {
+func getDiskMetrics(d *Daemon) ([]metrics.DiskMetrics, error) {
 	diskStats, err := os.ReadFile("/proc/diskstats")
 	if err != nil {
 		return nil, fmt.Errorf("Failed to read /proc/diskstats: %w", err)
 	}
 
-	out := map[string]metrics.DiskMetrics{}
+	out := []metrics.DiskMetrics{}
 	scanner := bufio.NewScanner(bytes.NewReader(diskStats))
 
 	for scanner.Scan() {
@@ -214,6 +221,10 @@ func getDiskMetrics(d *Daemon) (map[string]metrics.DiskMetrics, error) {
 		}
 
 		fields := strings.Fields(line)
+		if len(fields) < 10 {
+			return nil, fmt.Errorf("Invalid /proc/diskstats content: %q", line)
+		}
+
 		stats := metrics.DiskMetrics{}
 
 		stats.ReadsCompleted, err = strconv.ParseUint(fields[3], 10, 64)
@@ -240,26 +251,32 @@ func getDiskMetrics(d *Daemon) (map[string]metrics.DiskMetrics, error) {
 
 		stats.WrittenBytes = sectorsWritten * 512
 
-		out[fields[2]] = stats
+		stats.Device = fields[2]
+		out = append(out, stats)
 	}
 
 	return out, nil
 }
 
-func getFilesystemMetrics(d *Daemon) (map[string]metrics.FilesystemMetrics, error) {
+func getFilesystemMetrics(d *Daemon) ([]metrics.FilesystemMetrics, error) {
 	mounts, err := os.ReadFile("/proc/mounts")
 	if err != nil {
 		return nil, fmt.Errorf("Failed to read /proc/mounts: %w", err)
 	}
 
-	out := map[string]metrics.FilesystemMetrics{}
+	out := []metrics.FilesystemMetrics{}
 	scanner := bufio.NewScanner(bytes.NewReader(mounts))
 
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
+		line := scanner.Text()
+		fields := strings.Fields(line)
+
+		if len(fields) < 3 {
+			return nil, fmt.Errorf("Invalid /proc/mounts content: %q", line)
+		}
 
 		// Skip uninteresting mounts
-		if shared.StringInSlice(fields[2], defFSTypesExcluded) || defMountPointsExcluded.MatchString(fields[1]) {
+		if slices.Contains(defFSTypesExcluded, fields[2]) || defMountPointsExcluded.MatchString(fields[1]) {
 			continue
 		}
 
@@ -267,12 +284,12 @@ func getFilesystemMetrics(d *Daemon) (map[string]metrics.FilesystemMetrics, erro
 
 		stats.Mountpoint = fields[1]
 
-		statfs, err := filesystem.StatVFS(stats.Mountpoint)
+		statfs, err := linux.StatVFS(stats.Mountpoint)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to stat %s: %w", stats.Mountpoint, err)
 		}
 
-		fsType, err := filesystem.FSTypeToName(int32(statfs.Type))
+		fsType, err := linux.FSTypeToName(int32(statfs.Type))
 		if err == nil {
 			stats.FSType = fsType
 		}
@@ -281,7 +298,9 @@ func getFilesystemMetrics(d *Daemon) (map[string]metrics.FilesystemMetrics, erro
 		stats.FreeBytes = statfs.Bfree * uint64(statfs.Bsize)
 		stats.SizeBytes = statfs.Blocks * uint64(statfs.Bsize)
 
-		out[fields[0]] = stats
+		stats.Device = fields[0]
+
+		out = append(out, stats)
 	}
 
 	return out, nil
@@ -297,7 +316,12 @@ func getMemoryMetrics(d *Daemon) (metrics.MemoryMetrics, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 
 	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
+		line := scanner.Text()
+		fields := strings.Fields(line)
+
+		if len(fields) < 2 {
+			return metrics.MemoryMetrics{}, fmt.Errorf("Invalid /proc/meminfo content: %q", line)
+		}
 
 		fields[0] = strings.TrimRight(fields[0], ":")
 
@@ -355,8 +379,8 @@ func getMemoryMetrics(d *Daemon) (metrics.MemoryMetrics, error) {
 	return out, nil
 }
 
-func getNetworkMetrics(d *Daemon) (map[string]metrics.NetworkMetrics, error) {
-	out := map[string]metrics.NetworkMetrics{}
+func getNetworkMetrics(d *Daemon) ([]metrics.NetworkMetrics, error) {
+	out := []metrics.NetworkMetrics{}
 
 	for dev, state := range networkState() {
 		stats := metrics.NetworkMetrics{}
@@ -370,7 +394,9 @@ func getNetworkMetrics(d *Daemon) (map[string]metrics.NetworkMetrics, error) {
 		stats.TransmitErrors = uint64(state.Counters.ErrorsSent)
 		stats.TransmitPackets = uint64(state.Counters.PacketsSent)
 
-		out[dev] = stats
+		stats.Device = dev
+
+		out = append(out, stats)
 	}
 
 	return out, nil

@@ -8,9 +8,12 @@ test_image_expiry() {
 
   ensure_import_testimage
 
+  token="$(incus config trust add foo -q)"
   # shellcheck disable=2153
-  incus_remote remote add l1 "${INCUS_ADDR}" --accept-certificate --password foo
-  incus_remote remote add l2 "${INCUS2_ADDR}" --accept-certificate --password foo
+  incus_remote remote add l1 "${INCUS_ADDR}" --accept-certificate --token "${token}"
+
+  token="$(INCUS_DIR=${INCUS2_DIR} incus config trust add foo -q)"
+  incus_remote remote add l2 "${INCUS2_ADDR}" --accept-certificate --token "${token}"
 
   # Create containers from a remote image in two projects.
   incus_remote project create l2:p1 -c features.images=true -c features.profiles=false
@@ -32,7 +35,7 @@ test_image_expiry() {
   incus_remote image info "l2:${fp}" | grep -q "Expires.*3000"
 
   # Override the upload date for the image record in the default project.
-  INCUS_DIR="$INCUS2_DIR" incusd sql global "UPDATE images SET last_use_date='$(date --rfc-3339=seconds -u -d "2 days ago")' WHERE fingerprint='${fp}' AND project_id = 1" | grep -q "Rows affected: 1"
+  INCUS_DIR="$INCUS2_DIR" incus admin sql global "UPDATE images SET last_use_date='$(date --rfc-3339=seconds -u -d "2 days ago")' WHERE fingerprint='${fp}' AND project_id = 1" | grep -q "Rows affected: 1"
 
   # Trigger the expiry
   incus_remote config set l2: images.remote_cache_expiry 1
@@ -53,7 +56,7 @@ test_image_expiry() {
   incus_remote project switch l2:default
 
   # Override the upload date for the image record in the p1 project.
-  INCUS_DIR="$INCUS2_DIR" incusd sql global "UPDATE images SET last_use_date='$(date --rfc-3339=seconds -u -d "2 days ago")' WHERE fingerprint='${fp}' AND project_id > 1" | grep -q "Rows affected: 1"
+  INCUS_DIR="$INCUS2_DIR" incus admin sql global "UPDATE images SET last_use_date='$(date --rfc-3339=seconds -u -d "2 days ago")' WHERE fingerprint='${fp}' AND project_id > 1" | grep -q "Rows affected: 1"
   incus_remote project set l2:p1 images.remote_cache_expiry=1
 
   # Trigger the expiry in p1 project by changing global images.remote_cache_expiry.
@@ -119,6 +122,23 @@ test_image_import_existing_alias() {
     incus image delete newimage image2
 }
 
+test_image_import_with_reuse() {
+    ensure_import_testimage
+    incus init testimage c
+    testimage_fingerprint="$(incus image ls -c F -f csv testimage)"
+    image1_fingerprint="$(incus publish c --alias image1 | awk '{print $NF;}')"
+    incus delete c
+    incus image export image1 image1.file
+    incus image delete image1
+
+    incus image import image1.file.tar.gz --alias testimage --reuse
+
+    [ "$(incus image ls -c F -f csv testimage)" = "${image1_fingerprint}" ]
+    [ "$(incus image ls -c F -f csv "${testimage_fingerprint}" | wc -l)" = "0" ]
+
+    incus image delete testimage
+}
+
 test_image_refresh() {
   # shellcheck disable=2039,3043
   local INCUS2_DIR INCUS2_ADDR
@@ -129,7 +149,8 @@ test_image_refresh() {
 
   ensure_import_testimage
 
-  incus_remote remote add l2 "${INCUS2_ADDR}" --accept-certificate --password foo
+  token="$(INCUS_DIR=${INCUS2_DIR} incus config trust add foo -q)"
+  incus_remote remote add l2 "${INCUS2_ADDR}" --accept-certificate --token "${token}"
 
   poolDriver="$(incus storage show "$(incus profile device get default root pool)" | awk '/^driver:/ {print $2}')"
 
@@ -158,8 +179,8 @@ test_image_refresh() {
 
   if [ "${poolDriver}" != "dir" ]; then
     # Check old storage volume record exists and new one doesn't.
-    incusd sql global 'select name from storage_volumes' | grep "${fp}"
-    ! incusd sql global 'select name from storage_volumes' | grep "${new_fp}" || false
+    incus admin sql global 'select name from storage_volumes' | grep "${fp}"
+    ! incus admin sql global 'select name from storage_volumes' | grep "${new_fp}" || false
   fi
 
   # Refresh image
@@ -170,8 +191,8 @@ test_image_refresh() {
 
   if [ "${poolDriver}" != "dir" ]; then
     # Check old storage volume record has been replaced with new one.
-    ! incusd sql global 'select name from storage_volumes' | grep "${fp}" || false
-    incusd sql global 'select name from storage_volumes' | grep "${new_fp}"
+    ! incus admin sql global 'select name from storage_volumes' | grep "${fp}" || false
+    incus admin sql global 'select name from storage_volumes' | grep "${new_fp}"
   fi
 
   # Cleanup

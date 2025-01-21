@@ -11,12 +11,12 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/logger"
-	"github.com/lxc/incus/shared/termios"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/logger"
+	"github.com/lxc/incus/v6/shared/termios"
 )
 
 type cmdExec struct {
@@ -49,6 +49,11 @@ executable, passing the shell commands as arguments, for example:
   incus exec <instance> -- sh -c "cd /tmp && pwd"
 
 Mode defaults to non-interactive, interactive mode is selected if both stdin AND stdout are terminals (stderr is ignored).`))
+	cmd.Example = cli.FormatSection("", i18n.G(`incus exec c1 bash
+	Run the "bash" command in instance "c1"
+
+incus exec c1 -- ls -lh /
+	Run the "ls -lh /" command in instance "c1"`))
 
 	cmd.RunE = c.Run
 	cmd.Flags().StringArrayVar(&c.flagEnvironment, "env", nil, i18n.G("Environment variable to set (e.g. HOME=/home/foo)")+"``")
@@ -59,6 +64,14 @@ Mode defaults to non-interactive, interactive mode is selected if both stdin AND
 	cmd.Flags().Uint32Var(&c.flagUser, "user", 0, i18n.G("User ID to run the command as (default 0)")+"``")
 	cmd.Flags().Uint32Var(&c.flagGroup, "group", 0, i18n.G("Group ID to run the command as (default 0)")+"``")
 	cmd.Flags().StringVar(&c.flagCwd, "cwd", "", i18n.G("Directory to run the command in (default /root)")+"``")
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -166,10 +179,10 @@ func (c *cmdExec) Run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	var stdin io.ReadCloser
+	var stdin io.Reader
 	stdin = os.Stdin
 	if c.flagDisableStdin {
-		stdin = io.NopCloser(bytes.NewReader(nil))
+		stdin = bytes.NewReader(nil)
 	}
 
 	stdout := getStdout()

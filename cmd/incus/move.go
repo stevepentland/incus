@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
-	config "github.com/lxc/incus/internal/cliconfig"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
 )
 
 type cmdMove struct {
@@ -65,6 +65,18 @@ incus move <instance>/<old snapshot name> <instance>/<new snapshot name>
 	cmd.Flags().StringVar(&c.flagTargetProject, "target-project", "", i18n.G("Copy to a project different from the source")+"``")
 	cmd.Flags().BoolVar(&c.flagAllowInconsistent, "allow-inconsistent", false, i18n.G("Ignore copy errors for volatile files"))
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpRemotes(toComplete, false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -105,7 +117,7 @@ func (c *cmdMove) Run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// As an optimization, if the source an destination are the same, do
+	// As an optimization, if the source and destination are the same, do
 	// this via a simple rename. This only works for instances that aren't
 	// running, instances that are running should be live migrated (of
 	// course, this changing of hostname isn't supported right now, so this
@@ -137,69 +149,54 @@ func (c *cmdMove) Run(cmd *cobra.Command, args []string) error {
 
 	stateful := !c.flagStateless
 
-	if c.flagTarget != "" {
-		// If the target option was specified, we're moving an instance from a
-		// cluster member to another, let's use the dedicated API.
-		if sourceRemote == destRemote {
-			if c.flagInstanceOnly {
-				return fmt.Errorf(i18n.G("The --instance-only flag can't be used with --target"))
-			}
-
-			if c.flagStorage != "" {
-				return fmt.Errorf(i18n.G("The --storage flag can't be used with --target"))
-			}
-
-			if c.flagTargetProject != "" {
-				return fmt.Errorf(i18n.G("The --target-project flag can't be used with --target"))
-			}
-
-			if c.flagMode != moveDefaultMode {
-				return fmt.Errorf(i18n.G("The --mode flag can't be used with --target"))
-			}
-
-			return moveClusterInstance(conf, sourceResource, destResource, c.flagTarget, c.global.flagQuiet, stateful)
+	isServerSide := func() bool {
+		// Check if same source and destination.
+		if sourceRemote != destRemote {
+			return false
 		}
 
-		dest, err := conf.GetInstanceServer(destRemote)
-		if err != nil {
-			return err
+		// Check if asked for specific client mode.
+		if c.flagMode != moveDefaultMode {
+			return false
 		}
 
-		if !dest.IsClustered() {
-			return fmt.Errorf(i18n.G("The destination server is not clustered"))
-		}
-	}
-
-	// Support for server-side pool move.
-	if c.flagStorage != "" && sourceRemote == destRemote {
+		// Connect to the server.
 		source, err := conf.GetInstanceServer(sourceRemote)
 		if err != nil {
-			return err
+			return false
 		}
 
-		if source.HasExtension("instance_pool_move") {
-			if c.flagMode != moveDefaultMode {
-				return fmt.Errorf(i18n.G("The --mode flag can't be used with --storage"))
+		// Check if override is requested with a server lacking support.
+		if !source.HasExtension("instance_move_config") {
+			if len(c.flagConfig) > 0 {
+				return false
 			}
 
-			return moveInstancePool(conf, sourceResource, destResource, c.flagInstanceOnly, c.flagStorage, stateful)
-		}
-	}
-
-	// Support for server-side project move.
-	if c.flagTargetProject != "" && sourceRemote == destRemote {
-		source, err := conf.GetInstanceServer(sourceRemote)
-		if err != nil {
-			return err
-		}
-
-		if source.HasExtension("instance_project_move") {
-			if c.flagMode != moveDefaultMode {
-				return fmt.Errorf(i18n.G("The --mode flag can't be used with --target-project"))
+			if len(c.flagDevice) > 0 {
+				return false
 			}
 
-			return moveInstanceProject(conf, sourceResource, destResource, c.flagTargetProject, c.flagInstanceOnly, stateful)
+			if len(c.flagProfile) > 0 {
+				return false
+			}
 		}
+
+		// Check if server supports moving pools.
+		if c.flagStorage != "" && !source.HasExtension("instance_pool_move") {
+			return false
+		}
+
+		// Check if server supports moving projects.
+		if c.flagTargetProject != "" && !source.HasExtension("instance_project_move") {
+			return false
+		}
+
+		return true
+	}()
+
+	// Support for server-side move in clusters.
+	if isServerSide {
+		return c.moveInstance(sourceResource, destResource, stateful)
 	}
 
 	cpy := cmdCopy{}
@@ -226,14 +223,16 @@ func (c *cmdMove) Run(cmd *cobra.Command, args []string) error {
 	del.flagForceProtected = true
 	err = del.Run(cmd, args[:1])
 	if err != nil {
-		return fmt.Errorf("Failed to delete original instance after copying it: %w", err)
+		return fmt.Errorf(i18n.G("Failed to delete original instance after copying it: %w"), err)
 	}
 
 	return nil
 }
 
-// Move an instance using special POST /instances/<name>?target=<member> API.
-func moveClusterInstance(conf *config.Config, sourceResource string, destResource string, target string, quiet bool, stateful bool) error {
+// Move an instance between pools and projects using special POST /instances/<name> API.
+func (c *cmdMove) moveInstance(sourceResource string, destResource string, stateful bool) error {
+	conf := c.global.conf
+
 	// Parse the source.
 	sourceRemote, sourceName, err := conf.ParseRemote(sourceResource)
 	if err != nil {
@@ -256,25 +255,84 @@ func moveClusterInstance(conf *config.Config, sourceResource string, destResourc
 		destName = sourceName
 	}
 
-	// Connect to the source host
+	// Connect to the source host.
 	source, err := conf.GetInstanceServer(sourceRemote)
 	if err != nil {
 		return fmt.Errorf(i18n.G("Failed to connect to cluster member: %w"), err)
 	}
 
-	// Check that it's a cluster
-	if !source.IsClustered() {
-		return fmt.Errorf(i18n.G("The source server is not clustered"))
+	if !source.IsClustered() && c.flagTarget != "" {
+		return fmt.Errorf(i18n.G("--target can only be used with clusters"))
 	}
 
-	// The migrate API will do the right thing when passed a target.
-	source = source.UseTarget(target)
+	// Set the target if specified.
+	if c.flagTarget != "" {
+		source = source.UseTarget(c.flagTarget)
+	}
+
+	// Pass the new pool to the migration API.
 	req := api.InstancePost{
-		Name:      destName,
-		Migration: true,
-		Live:      stateful,
+		Name:         destName,
+		Migration:    true,
+		InstanceOnly: c.flagInstanceOnly,
+		Pool:         c.flagStorage,
+		Project:      c.flagTargetProject,
+		Live:         stateful,
 	}
 
+	// Override profiles.
+	var profiles *[]string
+	if len(c.flagProfile) > 0 {
+		profiles = &c.flagProfile
+	} else if c.flagNoProfiles {
+		profiles = &[]string{}
+	}
+
+	if profiles != nil {
+		req.Profiles = *profiles
+	}
+
+	// Override config.
+	if len(c.flagConfig) > 0 {
+		req.Config = map[string]string{}
+
+		for _, entry := range c.flagConfig {
+			key, value, found := strings.Cut(entry, "=")
+			if !found {
+				return fmt.Errorf(i18n.G("Bad key=value pair: %q"), entry)
+			}
+
+			req.Config[key] = value
+		}
+	}
+
+	// Override devices.
+	if len(c.flagDevice) > 0 {
+		req.Devices = map[string]map[string]string{}
+
+		// Parse the overrides.
+		deviceMap, err := parseDeviceOverrides(c.flagDevice)
+		if err != nil {
+			return err
+		}
+
+		// Fetch the current isntance.
+		inst, _, err := source.GetInstance(sourceName)
+		if err != nil {
+			return err
+		}
+
+		for devName, dev := range deviceMap {
+			fullDev := inst.ExpandedDevices[devName]
+			for k, v := range dev {
+				fullDev[k] = v
+			}
+
+			req.Devices[devName] = fullDev
+		}
+	}
+
+	// Move the instance.
 	op, err := source.MigrateInstance(sourceName, req)
 	if err != nil {
 		return fmt.Errorf(i18n.G("Migration API failure: %w"), err)
@@ -283,7 +341,7 @@ func moveClusterInstance(conf *config.Config, sourceResource string, destResourc
 	// Watch the background operation
 	progress := cli.ProgressRenderer{
 		Format: i18n.G("Transferring instance: %s"),
-		Quiet:  quiet,
+		Quiet:  c.global.flagQuiet,
 	}
 
 	_, err = op.AddHandler(progress.UpdateOp)
@@ -291,123 +349,15 @@ func moveClusterInstance(conf *config.Config, sourceResource string, destResourc
 		progress.Done("")
 		return err
 	}
+
 	// Wait for the move to complete
 	err = cli.CancelableWait(op, &progress)
 	if err != nil {
 		progress.Done("")
-		return err
+		return fmt.Errorf(i18n.G("Migration operation failure: %w"), err)
 	}
 
 	progress.Done("")
-
-	err = op.Wait()
-	if err != nil {
-		return fmt.Errorf(i18n.G("Migration operation failure: %w"), err)
-	}
-
-	return nil
-}
-
-// Move an instance between pools using special POST /instances/<name> API.
-func moveInstancePool(conf *config.Config, sourceResource string, destResource string, instanceOnly bool, storage string, stateful bool) error {
-	// Parse the source.
-	sourceRemote, sourceName, err := conf.ParseRemote(sourceResource)
-	if err != nil {
-		return err
-	}
-
-	// Parse the destination.
-	_, destName, err := conf.ParseRemote(destResource)
-	if err != nil {
-		return err
-	}
-
-	// Make sure we have an instance or snapshot name.
-	if sourceName == "" {
-		return fmt.Errorf(i18n.G("You must specify a source instance name"))
-	}
-
-	// The destination name is optional.
-	if destName == "" {
-		destName = sourceName
-	}
-
-	// Connect to the source host.
-	source, err := conf.GetInstanceServer(sourceRemote)
-	if err != nil {
-		return fmt.Errorf(i18n.G("Failed to connect to cluster member: %w"), err)
-	}
-
-	// Pass the new pool to the migration API.
-	req := api.InstancePost{
-		Name:         destName,
-		Migration:    true,
-		Pool:         storage,
-		InstanceOnly: instanceOnly,
-		Live:         stateful,
-	}
-
-	op, err := source.MigrateInstance(sourceName, req)
-	if err != nil {
-		return fmt.Errorf(i18n.G("Migration API failure: %w"), err)
-	}
-
-	err = op.Wait()
-	if err != nil {
-		return fmt.Errorf(i18n.G("Migration operation failure: %w"), err)
-	}
-
-	return nil
-}
-
-// Move an instance between projects using special POST /instances/<name> API.
-func moveInstanceProject(conf *config.Config, sourceResource string, destResource string, targetProject string, instanceOnly bool, stateful bool) error {
-	// Parse the source.
-	sourceRemote, sourceName, err := conf.ParseRemote(sourceResource)
-	if err != nil {
-		return err
-	}
-
-	// Parse the destination.
-	_, destName, err := conf.ParseRemote(destResource)
-	if err != nil {
-		return err
-	}
-
-	// Make sure we have an instance or snapshot name.
-	if sourceName == "" {
-		return fmt.Errorf(i18n.G("You must specify a source instance name"))
-	}
-
-	// The destination name is optional.
-	if destName == "" {
-		destName = sourceName
-	}
-
-	// Connect to the source host.
-	source, err := conf.GetInstanceServer(sourceRemote)
-	if err != nil {
-		return fmt.Errorf(i18n.G("Failed to connect to cluster member: %w"), err)
-	}
-
-	// Pass the new project to the migration API.
-	req := api.InstancePost{
-		Name:         destName,
-		Migration:    true,
-		Project:      targetProject,
-		InstanceOnly: instanceOnly,
-		Live:         stateful,
-	}
-
-	op, err := source.MigrateInstance(sourceName, req)
-	if err != nil {
-		return fmt.Errorf(i18n.G("Migration API failure: %w"), err)
-	}
-
-	err = op.Wait()
-	if err != nil {
-		return fmt.Errorf(i18n.G("Migration operation failure: %w"), err)
-	}
 
 	return nil
 }

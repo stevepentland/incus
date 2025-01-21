@@ -12,13 +12,13 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/incusd/daemon"
-	"github.com/lxc/incus/incusd/device/config"
-	"github.com/lxc/incus/incusd/util"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api/guest"
-	"github.com/lxc/incus/shared/logger"
+	incus "github.com/lxc/incus/v6/client"
+	"github.com/lxc/incus/v6/internal/server/daemon"
+	"github.com/lxc/incus/v6/internal/server/device/config"
+	localUtil "github.com/lxc/incus/v6/internal/server/util"
+	api "github.com/lxc/incus/v6/shared/api/guest"
+	"github.com/lxc/incus/v6/shared/logger"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 // DevIncusServer creates an http.Server capable of handling requests against the
@@ -242,7 +242,7 @@ func hoistReq(f func(*Daemon, http.ResponseWriter, *http.Request) *devIncusRespo
 				debugLogger = logger.Logger(logger.Log)
 			}
 
-			_ = util.WriteJSON(w, resp.content, debugLogger)
+			_ = localUtil.WriteJSON(w, resp.content, debugLogger)
 		} else if resp.ctype != "websocket" {
 			w.Header().Set("Content-Type", "application/octet-stream")
 			_, _ = fmt.Fprint(w, resp.content.(string))
@@ -309,7 +309,7 @@ func createDevIncuslListener(dir string) (net.Listener, error) {
 // Remove any stale socket file at the given path.
 func socketUnixRemoveStale(path string) error {
 	// If there's no socket file at all, there's nothing to do.
-	if !shared.PathExists(path) {
+	if !util.PathExists(path) {
 		return nil
 	}
 

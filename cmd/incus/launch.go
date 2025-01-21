@@ -5,14 +5,14 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
 )
 
 type cmdLaunch struct {
 	global *cmdGlobal
-	init   *cmdInit
+	init   *cmdCreate
 
 	flagConsole string
 }
@@ -33,13 +33,24 @@ incus launch images:ubuntu/22.04 u2 -t aws:t2.micro
     Create and start a container using the same size as an AWS t2.micro (1 vCPU, 1GiB of RAM)
 
 incus launch images:ubuntu/22.04 v1 --vm -c limits.cpu=4 -c limits.memory=4GiB
-    Create and start a virtual machine with 4 vCPUs and 4GiB of RAM`))
+    Create and start a virtual machine with 4 vCPUs and 4GiB of RAM
+
+incus launch images:debian/12 v2 --vm -d root,size=50GiB -d root,io.bus=nvme
+    Create and start a virtual machine, overriding the disk size and bus`))
 	cmd.Hidden = false
 
 	cmd.RunE = c.Run
 
 	cmd.Flags().StringVar(&c.flagConsole, "console", "", i18n.G("Immediately attach to the console")+"``")
 	cmd.Flags().Lookup("console").NoOptDefVal = "console"
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) != 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		return c.global.cmpImages(toComplete)
+	}
 
 	return cmd
 }
@@ -54,9 +65,37 @@ func (c *cmdLaunch) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Call the matching code from init
-	d, name, err := c.init.create(conf, args)
+	d, name, err := c.init.create(conf, args, true)
 	if err != nil {
 		return err
+	}
+
+	// Check if the instance was started by the server.
+	if d.HasExtension("instance_create_start") {
+		// Handle console attach
+		if c.flagConsole != "" {
+			console := cmdConsole{}
+			console.global = c.global
+			console.flagType = c.flagConsole
+
+			consoleErr := console.console(d, name)
+			if consoleErr != nil {
+				// Check if still running.
+				state, _, err := d.GetInstanceState(name)
+				if err != nil {
+					return err
+				}
+
+				if state.StatusCode != api.Stopped {
+					return consoleErr
+				}
+
+				console.flagShowLog = true
+				return console.console(d, name)
+			}
+		}
+
+		return nil
 	}
 
 	// Get the remote
@@ -107,7 +146,12 @@ func (c *cmdLaunch) Run(cmd *cobra.Command, args []string) error {
 			prettyName = fmt.Sprintf("%s:%s", remote, name)
 		}
 
-		return fmt.Errorf("%s\n"+i18n.G("Try `incus info --show-log %s` for more info"), err, prettyName)
+		projectArg := ""
+		if conf.ProjectOverride != "" && conf.ProjectOverride != api.ProjectDefaultName {
+			projectArg = " --project " + conf.ProjectOverride
+		}
+
+		return fmt.Errorf("%s\n"+i18n.G("Try `incus info --show-log %s%s` for more info"), err, prettyName, projectArg)
 	}
 
 	progress.Done("")
@@ -117,7 +161,22 @@ func (c *cmdLaunch) Run(cmd *cobra.Command, args []string) error {
 		console := cmdConsole{}
 		console.global = c.global
 		console.flagType = c.flagConsole
-		return console.Console(d, name)
+
+		consoleErr := console.console(d, name)
+		if consoleErr != nil {
+			// Check if still running.
+			state, _, err := d.GetInstanceState(name)
+			if err != nil {
+				return err
+			}
+
+			if state.StatusCode != api.Stopped {
+				return consoleErr
+			}
+
+			console.flagShowLog = true
+			return console.console(d, name)
+		}
 	}
 
 	return nil

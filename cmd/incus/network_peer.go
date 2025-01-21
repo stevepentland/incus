@@ -4,17 +4,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/termios"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/termios"
 )
 
 type cmdNetworkPeer struct {
@@ -70,7 +70,13 @@ type cmdNetworkPeerList struct {
 	global      *cmdGlobal
 	networkPeer *cmdNetworkPeer
 
-	flagFormat string
+	flagFormat  string
+	flagColumns string
+}
+
+type networkPeerColumn struct {
+	Name string
+	Data func(api.NetworkPeer) string
 }
 
 func (c *cmdNetworkPeerList) Command() *cobra.Command {
@@ -78,12 +84,105 @@ func (c *cmdNetworkPeerList) Command() *cobra.Command {
 	cmd.Use = usage("list", i18n.G("[<remote>:]<network>"))
 	cmd.Aliases = []string{"ls"}
 	cmd.Short = i18n.G("List available network peers")
-	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("List available network peers"))
+	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
+		`List available network peers
+
+Default column layout: ndpts
+
+== Columns ==
+The -c option takes a comma separated list of arguments that control
+which network zone attributes to output when displaying in table or csv
+format.
+
+Column arguments are either pre-defined shorthand chars (see below),
+or (extended) config keys.
+
+Commas between consecutive shorthand chars are optional.
+
+Pre-defined column shorthand chars:
+  n - Name
+  d - description
+  p - Peer
+  t - Type
+  s - State`))
 
 	cmd.RunE = c.Run
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
+	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", defaultNetworkPeerListColumns, i18n.G("Columns")+"``")
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
+}
+
+const defaultNetworkPeerListColumns = "ndpts"
+
+func (c *cmdNetworkPeerList) parseColumns() ([]networkPeerColumn, error) {
+	columnsShorthandMap := map[rune]networkPeerColumn{
+		'n': {i18n.G("NAME"), c.nameColumnData},
+		'd': {i18n.G("DESCRIPTION"), c.descriptionColumnData},
+		'p': {i18n.G("PEER"), c.peerColumnData},
+		't': {i18n.G("TYPE"), c.typeColumnData},
+		's': {i18n.G("STATE"), c.stateColumnData},
+	}
+
+	columnList := strings.Split(c.flagColumns, ",")
+	columns := []networkPeerColumn{}
+
+	for _, columnEntry := range columnList {
+		if columnEntry == "" {
+			return nil, fmt.Errorf(i18n.G("Empty column entry (redundant, leading or trailing command) in '%s'"), c.flagColumns)
+		}
+
+		for _, columnRune := range columnEntry {
+			column, ok := columnsShorthandMap[columnRune]
+			if !ok {
+				return nil, fmt.Errorf(i18n.G("Unknown column shorthand char '%c' in '%s'"), columnRune, columnEntry)
+			}
+
+			columns = append(columns, column)
+		}
+	}
+
+	return columns, nil
+}
+
+func (c *cmdNetworkPeerList) nameColumnData(peer api.NetworkPeer) string {
+	return peer.Name
+}
+
+func (c *cmdNetworkPeerList) descriptionColumnData(peer api.NetworkPeer) string {
+	return peer.Description
+}
+
+func (c *cmdNetworkPeerList) peerColumnData(peer api.NetworkPeer) string {
+	target := "Unknown"
+
+	if peer.TargetProject != "" && peer.TargetNetwork != "" {
+		target = fmt.Sprintf("%s/%s", peer.TargetProject, peer.TargetNetwork)
+	} else if peer.TargetIntegration != "" {
+		target = peer.TargetIntegration
+	}
+
+	return target
+}
+
+func (c *cmdNetworkPeerList) typeColumnData(peer api.NetworkPeer) string {
+	return peer.Type
+}
+
+func (c *cmdNetworkPeerList) stateColumnData(peer api.NetworkPeer) string {
+	return strings.ToUpper(peer.Status)
 }
 
 func (c *cmdNetworkPeerList) Run(cmd *cobra.Command, args []string) error {
@@ -115,34 +214,30 @@ func (c *cmdNetworkPeerList) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	data := make([][]string, 0, len(peers))
+	// Parse column flags.
+	columns, err := c.parseColumns()
+	if err != nil {
+		return err
+	}
+
+	data := [][]string{}
 	for _, peer := range peers {
-		targetPeer := "Unknown"
-
-		if peer.TargetProject != "" && peer.TargetNetwork != "" {
-			targetPeer = fmt.Sprintf("%s/%s", peer.TargetProject, peer.TargetNetwork)
+		line := []string{}
+		for _, column := range columns {
+			line = append(line, column.Data(peer))
 		}
 
-		details := []string{
-			peer.Name,
-			peer.Description,
-			targetPeer,
-			strings.ToUpper(peer.Status),
-		}
-
-		data = append(data, details)
+		data = append(data, line)
 	}
 
 	sort.Sort(cli.SortColumnsNaturally(data))
 
-	header := []string{
-		i18n.G("NAME"),
-		i18n.G("DESCRIPTION"),
-		i18n.G("PEER"),
-		i18n.G("STATE"),
+	header := []string{}
+	for _, column := range columns {
+		header = append(header, column.Name)
 	}
 
-	return cli.RenderTable(c.flagFormat, header, data, peers)
+	return cli.RenderTable(os.Stdout, c.flagFormat, header, data, peers)
 }
 
 // Show.
@@ -157,6 +252,18 @@ func (c *cmdNetworkPeerShow) Command() *cobra.Command {
 	cmd.Short = i18n.G("Show network peer configurations")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Show network peer configurations"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkPeers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -206,14 +313,38 @@ func (c *cmdNetworkPeerShow) Run(cmd *cobra.Command, args []string) error {
 type cmdNetworkPeerCreate struct {
 	global      *cmdGlobal
 	networkPeer *cmdNetworkPeer
+
+	flagType        string
+	flagDescription string
 }
 
 func (c *cmdNetworkPeerCreate) Command() *cobra.Command {
 	cmd := &cobra.Command{}
-	cmd.Use = usage("create", i18n.G("[<remote>:]<network> <peer_name> <[target project/]target_network> [key=value...]"))
+	cmd.Use = usage("create", i18n.G("[<remote>:]<network> <peer_name> <[target project/]<target network or integration> [key=value...]"))
 	cmd.Short = i18n.G("Create new network peering")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Create new network peering"))
+	cmd.Example = cli.FormatSection("", i18n.G(`incus network peer create default peer1 web/default
+    Create a new peering between network "default" in the current project and network "default" in the "web" project
+
+incus network peer create default peer2 ovn-ic --type=remote
+    Create a new peering between network "default" in the current project and other remote networks through the "ovn-ic" integration
+
+incus network peer create default peer3 web/default < config.yaml
+	Create a new peering between network default in the current project and network default in the web project using the configuration
+	in the file config.yaml`))
+
 	cmd.RunE = c.Run
+
+	cmd.Flags().StringVar(&c.flagType, "type", "local", i18n.G("Type of peer (local or remote)")+"``")
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Peer description")+"``")
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -223,6 +354,10 @@ func (c *cmdNetworkPeerCreate) Run(cmd *cobra.Command, args []string) error {
 	exit, err := c.global.CheckArgs(cmd, args, 3, -1)
 	if exit {
 		return err
+	}
+
+	if !slices.Contains([]string{"local", "remote"}, c.flagType) {
+		return fmt.Errorf(i18n.G("Invalid peer type"))
 	}
 
 	// Parse remote.
@@ -242,17 +377,17 @@ func (c *cmdNetworkPeerCreate) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	if args[2] == "" {
-		return fmt.Errorf(i18n.G("Missing target network"))
+		return fmt.Errorf(i18n.G("Missing target network or integration"))
 	}
 
 	targetParts := strings.SplitN(args[2], "/", 2)
 
-	var targetProject, targetNetwork string
+	var targetProject, target string
 	if len(targetParts) == 2 {
 		targetProject = targetParts[0]
-		targetNetwork = targetParts[1]
+		target = targetParts[1]
 	} else {
-		targetNetwork = targetParts[0]
+		target = targetParts[0]
 	}
 
 	// If stdin isn't a terminal, read yaml from it.
@@ -286,9 +421,19 @@ func (c *cmdNetworkPeerCreate) Run(cmd *cobra.Command, args []string) error {
 	// Create the network peer.
 	peer := api.NetworkPeersPost{
 		Name:           args[1],
-		TargetProject:  targetProject,
-		TargetNetwork:  targetNetwork,
 		NetworkPeerPut: peerPut,
+		Type:           c.flagType,
+	}
+
+	if c.flagType == "local" {
+		peer.TargetProject = targetProject
+		peer.TargetNetwork = target
+	} else if c.flagType == "remote" {
+		peer.TargetIntegration = target
+	}
+
+	if c.flagDescription != "" {
+		peer.Description = c.flagDescription
 	}
 
 	client := resource.server
@@ -332,6 +477,23 @@ func (c *cmdNetworkPeerGet) Command() *cobra.Command {
 	cmd.RunE = c.Run
 
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Get the key as a network peer property"))
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkPeers(args[0])
+		}
+
+		if len(args) == 2 {
+			return c.global.cmpNetworkPeerConfigs(args[0], args[1])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -404,6 +566,19 @@ For backward compatibility, a single configuration key may still be set with:
 	cmd.RunE = c.Run
 
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Set the key as a network peer property"))
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkPeers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -489,6 +664,23 @@ func (c *cmdNetworkPeerUnset) Command() *cobra.Command {
 	cmd.RunE = c.Run
 
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Unset the key as a network peer property"))
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkPeers(args[0])
+		}
+
+		if len(args) == 2 {
+			return c.global.cmpNetworkPeerConfigs(args[0], args[1])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -517,6 +709,18 @@ func (c *cmdNetworkPeerEdit) Command() *cobra.Command {
 	cmd.Short = i18n.G("Edit network peer configurations as YAML")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Edit network peer configurations as YAML"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkPeers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -592,7 +796,7 @@ func (c *cmdNetworkPeerEdit) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Spawn the editor.
-	content, err := shared.TextEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
+	content, err := textEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
 	if err != nil {
 		return err
 	}
@@ -615,7 +819,7 @@ func (c *cmdNetworkPeerEdit) Run(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			content, err = shared.TextEditor("", content)
+			content, err = textEditor("", content)
 			if err != nil {
 				return err
 			}
@@ -642,6 +846,18 @@ func (c *cmdNetworkPeerDelete) Command() *cobra.Command {
 	cmd.Short = i18n.G("Delete network peerings")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Delete network peerings"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkPeers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }

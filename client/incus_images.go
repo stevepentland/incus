@@ -9,14 +9,16 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	"github.com/lxc/incus/shared/cancel"
-	"github.com/lxc/incus/shared/ioprogress"
-	"github.com/lxc/incus/shared/units"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/cancel"
+	"github.com/lxc/incus/v6/shared/ioprogress"
+	localtls "github.com/lxc/incus/v6/shared/tls"
+	"github.com/lxc/incus/v6/shared/units"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 // Image handling functions
@@ -26,6 +28,26 @@ func (r *ProtocolIncus) GetImages() ([]api.Image, error) {
 	images := []api.Image{}
 
 	_, err := r.queryStruct("GET", "/images?recursion=1", nil, "", &images)
+	if err != nil {
+		return nil, err
+	}
+
+	return images, nil
+}
+
+// GetImagesAllProjects returns a list of images across all projects as Image structs.
+func (r *ProtocolIncus) GetImagesAllProjects() ([]api.Image, error) {
+	images := []api.Image{}
+
+	v := url.Values{}
+	v.Set("recursion", "1")
+	v.Set("all-projects", "true")
+
+	if !r.HasExtension("images_all_projects") {
+		return nil, fmt.Errorf("The server is missing the required \"images_all_projects\" API extension")
+	}
+
+	_, err := r.queryStruct("GET", fmt.Sprintf("/images?%s", v.Encode()), nil, "", &images)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +155,7 @@ func (r *ProtocolIncus) GetPrivateImageFile(fingerprint string, secret string, r
 	}
 
 	// Attempt to download from host
-	if secret == "" && shared.PathExists("/dev/incus/sock") && os.Geteuid() == 0 {
+	if secret == "" && util.PathExists("/dev/incus/sock") && os.Geteuid() == 0 {
 		unixURI := fmt.Sprintf("http://unix.socket%s", uri)
 
 		// Setup the HTTP client
@@ -200,6 +222,12 @@ func incusDownloadImage(fingerprint string, uri string, userAgent string, do fun
 		ctype = "application/octet-stream"
 	}
 
+	// Check the image type.
+	imageType := response.Header.Get("X-Incus-Type")
+	if imageType == "" {
+		imageType = "incus"
+	}
+
 	// Handle the data
 	body := response.Body
 	if req.ProgressHandler != nil {
@@ -259,7 +287,7 @@ func incusDownloadImage(fingerprint string, uri string, userAgent string, do fun
 			return nil, err
 		}
 
-		if !shared.StringInSlice(part.FormName(), []string{"rootfs", "rootfs.img"}) {
+		if !slices.Contains([]string{"rootfs", "rootfs.img"}, part.FormName()) {
 			return nil, fmt.Errorf("Invalid multipart image")
 		}
 
@@ -273,7 +301,7 @@ func incusDownloadImage(fingerprint string, uri string, userAgent string, do fun
 
 		// Check the hash
 		hash := fmt.Sprintf("%x", sha256.Sum(nil))
-		if !strings.HasPrefix(hash, fingerprint) {
+		if imageType != "oci" && !strings.HasPrefix(hash, fingerprint) {
 			return nil, fmt.Errorf("Image fingerprint doesn't match. Got %s expected %s", hash, fingerprint)
 		}
 
@@ -301,7 +329,7 @@ func incusDownloadImage(fingerprint string, uri string, userAgent string, do fun
 
 	// Check the hash
 	hash := fmt.Sprintf("%x", sha256.Sum(nil))
-	if !strings.HasPrefix(hash, fingerprint) {
+	if imageType != "oci" && !strings.HasPrefix(hash, fingerprint) {
 		return nil, fmt.Errorf("Image fingerprint doesn't match. Got %s expected %s", hash, fingerprint)
 	}
 
@@ -421,9 +449,14 @@ func (r *ProtocolIncus) CreateImage(image api.ImagesPost, args *ImageCreateArgs)
 		w := multipart.NewWriter(pw)
 
 		go func() {
+			var ioErr error
 			defer func() {
-				w.Close()
-				pw.Close()
+				cerr := w.Close()
+				if ioErr == nil && cerr != nil {
+					ioErr = cerr
+				}
+
+				_ = pw.CloseWithError(ioErr)
 			}()
 
 			// Metadata file
@@ -521,6 +554,16 @@ func (r *ProtocolIncus) CreateImage(image api.ImagesPost, args *ImageCreateArgs)
 		}
 
 		req.Header.Set("X-Incus-profiles", imgProfiles.Encode())
+	}
+
+	if len(image.Aliases) > 0 {
+		imgProfiles := url.Values{}
+
+		for _, v := range image.Aliases {
+			imgProfiles.Add("alias", v.Name)
+		}
+
+		req.Header.Set("X-Incus-aliases", imgProfiles.Encode())
 	}
 
 	// Set the user agent
@@ -643,7 +686,7 @@ func (r *ProtocolIncus) tryCopyImage(req api.ImagesPost, urls []string) (RemoteO
 			if err != nil {
 				errors = append(errors, remoteOperationResult{URL: serverURL, Error: err})
 
-				if shared.IsConnectionError(err) {
+				if localtls.IsConnectionError(err) {
 					continue
 				}
 
@@ -705,8 +748,12 @@ func (r *ProtocolIncus) CopyImage(source ImageServer, image api.Image, args *Ima
 			},
 		}
 
+		imagesPost.Aliases = args.Aliases
 		if args.CopyAliases {
 			imagesPost.Aliases = image.Aliases
+			if args.Aliases != nil {
+				imagesPost.Aliases = append(imagesPost.Aliases, args.Aliases...)
+			}
 		}
 
 		imagesPost.ExpiresAt = image.ExpiresAt
@@ -731,7 +778,6 @@ func (r *ProtocolIncus) CopyImage(source ImageServer, image api.Image, args *Ima
 			Target:      info.URL,
 			Certificate: info.Certificate,
 			Secret:      secret.(string),
-			Aliases:     image.Aliases,
 			Project:     info.Project,
 			Profiles:    image.Profiles,
 		}
@@ -799,6 +845,7 @@ func (r *ProtocolIncus) CopyImage(source ImageServer, image api.Image, args *Ima
 		imagePost.Public = args.Public
 		imagePost.Profiles = image.Profiles
 
+		imagePost.Aliases = args.Aliases
 		if args.CopyAliases {
 			imagePost.Aliases = image.Aliases
 			if args.Aliases != nil {
@@ -843,6 +890,19 @@ func (r *ProtocolIncus) CopyImage(source ImageServer, image api.Image, args *Ima
 			if err != nil {
 				rop.err = remoteOperationError("Failed to copy image", nil)
 				return
+			}
+
+			// Apply the aliases.
+			for _, entry := range imagePost.Aliases {
+				alias := api.ImageAliasesPost{}
+				alias.Name = entry.Name
+				alias.Target = image.Fingerprint
+
+				err := r.CreateImageAlias(alias)
+				if err != nil {
+					rop.err = remoteOperationError("Failed to add alias", nil)
+					return
+				}
 			}
 		}()
 

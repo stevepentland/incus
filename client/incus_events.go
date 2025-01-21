@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/gorilla/websocket"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
+	"github.com/lxc/incus/v6/shared/api"
 )
 
 // Event handling functions
@@ -143,7 +143,7 @@ func (r *ProtocolIncus) getEvents(allProjects bool) (*EventListener, error) {
 			for _, listener := range r.eventListeners[listener.projectName] {
 				listener.targetsLock.Lock()
 				for _, target := range listener.targets {
-					if target.types != nil && !shared.StringInSlice(event.Type, target.types) {
+					if target.types != nil && !slices.Contains(target.types, event.Type) {
 						continue
 					}
 

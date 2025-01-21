@@ -1,20 +1,9 @@
----
-discourse: 15457
----
-
 (storage-ceph)=
 # Ceph RBD - `ceph`
-
-```{youtube} https://youtube.com/watch?v=kVLGbvRU98A
-```
 
 <!-- Include start Ceph intro -->
 [Ceph](https://ceph.io/en/) is an open-source storage platform that stores its data in a storage cluster based on {abbr}`RADOS (Reliable Autonomic Distributed Object Store)`.
 It is highly scalable and, as a distributed system without a single point of failure, very reliable.
-
-```{tip}
-If you want to quickly set up a basic Ceph cluster, check out [MicroCeph](https://microcloud.is).
-```
 
 Ceph provides different components for block storage and for file systems.
 <!-- Include end Ceph intro -->
@@ -33,7 +22,7 @@ They are also referred to as *data pools*, *storage pools* or *OSD pools*.
 
 Ceph block devices are also called *RBD images*, and you can create *snapshots* and *clones* of these RBD images.
 
-## `ceph` driver in LXD
+## `ceph` driver in Incus
 
 ```{note}
 To use the Ceph RBD driver, you must specify it as `ceph`.
@@ -53,15 +42,15 @@ As a result and depending on the internal network, storage access might be a bit
 On the other hand, using remote storage has big advantages in a cluster setup, because all cluster members have access to the same storage pools with the exact same contents, without the need to synchronize storage pools.
 <!-- Include end Ceph driver remote -->
 
-The `ceph` driver in LXD uses RBD images for images, and snapshots and clones to create instances and snapshots.
+The `ceph` driver in Incus uses RBD images for images, and snapshots and clones to create instances and snapshots.
 
 <!-- Include start Ceph driver control -->
-LXD assumes that it has full control over the OSD storage pool.
-Therefore, you should never maintain any file system entities that are not owned by LXD in a LXD OSD storage pool, because LXD might delete them.
+Incus assumes that it has full control over the OSD storage pool.
+Therefore, you should never maintain any file system entities that are not owned by Incus in an Incus OSD storage pool, because Incus might delete them.
 <!-- Include end Ceph driver control -->
 
 Due to the way copy-on-write works in Ceph RBD, parent RBD images can't be removed until all children are gone.
-As a result, LXD automatically renames any objects that are removed but still referenced.
+As a result, Incus automatically renames any objects that are removed but still referenced.
 Such objects are kept with a  `zombie_` prefix until all references are gone and the object can safely be removed.
 
 ### Limitations
@@ -74,7 +63,7 @@ Sharing custom volumes between instances
   If you need to share a custom volume with content type `filesystem`, use the {ref}`CephFS <storage-cephfs>` driver instead.
 
 Sharing the OSD storage pool between installations
-: Sharing the same OSD storage pool between multiple LXD installations is not supported.
+: Sharing the same OSD storage pool between multiple Incus installations is not supported.
 
 Using an OSD pool of type "erasure"
 : To use a Ceph OSD pool of type "erasure", you must create the OSD pool beforehand.
@@ -109,8 +98,12 @@ Key                           | Type                          | Default         
 
 Key                     | Type      | Condition                 | Default                                        | Description
 :--                     | :---      | :--------                 | :------                                        | :----------
-`block.filesystem`      | string    |                           | same as `volume.block.filesystem`              | {{block_filesystem}}
-`block.mount_options`   | string    |                           | same as `volume.block.mount_options`           | Mount options for block-backed file system volumes
+`block.filesystem`      | string    | block-based volume with content type `filesystem` | same as `volume.block.filesystem`              | {{block_filesystem}}
+`block.mount_options`   | string    | block-based volume with content type `filesystem` | same as `volume.block.mount_options`           | Mount options for block-backed file system volumes
+`initial.gid`           | int       | custom volume with content type `filesystem`  | same as `volume.initial.uid` or `0`           | GID of the volume owner in the instance
+`initial.mode`          | int       | custom volume with content type `filesystem`  | same as `volume.initial.mode` or `711`        | Mode  of the volume in the instance
+`initial.uid`           | int       | custom volume with content type `filesystem`  | same as `volume.initial.gid` or `0`           | UID of the volume owner in the instance
+`security.shared`       | bool      | custom block volume       | same as `volume.security.shared` or `false`    | Enable sharing the volume across multiple instances
 `security.shifted`      | bool      | custom volume             | same as `volume.security.shifted` or `false`   | {{enable_ID_shifting}}
 `security.unmapped`     | bool      | custom volume             | same as `volume.security.unmapped` or `false`  | Disable ID mapping for the volume
 `size`                  | string    |                           | same as `volume.size`                          | Size/quota of the storage volume

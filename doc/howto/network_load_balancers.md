@@ -1,7 +1,3 @@
----
-discourse: 14317
----
-
 (network-load-balancers)=
 # How to configure network load balancers
 
@@ -24,7 +20,7 @@ A load balancer is made up of:
 Use the following command to create a network load balancer:
 
 ```bash
-lxc network load-balancer create <network_name> <listen_address> [configuration_options...]
+incus network load-balancer create <network_name> <listen_address> [configuration_options...]
 ```
 
 Each load balancer is assigned to a network.
@@ -38,16 +34,26 @@ Property         | Type         | Required | Description
 :--              | :--          | :--      | :--
 `listen_address` | string       | yes      | IP address to listen on
 `description`    | string       | no       | Description of the network load balancer
-`config`         | string set   | no       | Configuration options as key/value pairs (only `user.*` custom keys supported)
+`config`         | string set   | no       | Configuration options as key/value pairs (see below)
 `backends`       | backend list | no       | List of {ref}`backend specifications <network-load-balancers-backend-specifications>`
 `ports`          | port list    | no       | List of {ref}`port specifications <network-load-balancers-port-specifications>`
+
+### Configuration options
+
+The following configuration options are available for load balancers:
+
+% Include content from [../config_options.txt](../config_options.txt)
+```{include} ../config_options.txt
+    :start-after: <!-- config group network_load_balancer-common start -->
+    :end-before: <!-- config group network_load_balancer-common end -->
+```
 
 (network-load-balancers-listen-addresses)=
 ### Requirements for listen addresses
 
 The following requirements must be met for valid listen addresses:
 
-- Allowed listen addresses must be defined in the uplink network's `ipv{n}.routes` settings or the project's `restricted.networks.subnets` setting (if set).
+- Allowed listen addresses must be defined in the uplink network's `ipv{n}.routes` settings or the project's {config:option}`project-restricted:restricted.networks.subnets` setting (if set).
 - The listen address must not overlap with a subnet that is in use with another network or entity in that network.
 
 (network-load-balancers-backend-specifications)=
@@ -59,7 +65,7 @@ The backend target address must be within the same subnet as the network that th
 Use the following command to add a backend specification:
 
 ```bash
-lxc network load-balancer backend add <network_name> <listen_address> <backend_name> <listen_ports> <target_address> [<target_ports>]
+incus network load-balancer backend add <network_name> <listen_address> <backend_name> <listen_ports> <target_address> [<target_ports>]
 ```
 
 The target ports are optional.
@@ -89,7 +95,7 @@ You can add port specifications to the network load balancer to forward traffic 
 Use the following command to add a port specification:
 
 ```bash
-lxc network load-balancer port add <network_name> <listen_address> <protocol> <listen_ports> <backend_name>[,<backend_name>...]
+incus network load-balancer port add <network_name> <listen_address> <protocol> <listen_ports> <backend_name>[,<backend_name>...]
 ```
 
 You can specify a single listen port or a set of ports.
@@ -111,7 +117,7 @@ Property          | Type         | Required | Description
 Use the following command to edit a network load balancer:
 
 ```bash
-lxc network load-balancer edit <network_name> <listen_address>
+incus network load-balancer edit <network_name> <listen_address>
 ```
 
 This command opens the network load balancer in YAML format for editing.
@@ -122,5 +128,5 @@ You can edit both the general configuration, backend and the port specifications
 Use the following command to delete a network load balancer:
 
 ```bash
-lxc network load-balancer delete <network_name> <listen_address>
+incus network load-balancer delete <network_name> <listen_address>
 ```

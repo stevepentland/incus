@@ -1,7 +1,10 @@
 API:
-- doc/api-extensions.md
-- doc/rest-api.yaml
-- shared/api/**/*
+- changed-files:
+  - any-glob-to-any-file:
+    - doc/api-extensions.md
+    - doc/rest-api.yaml
+    - shared/api/**/*
 Documentation:
-- doc/**/*
-- .sphinx/**/*
+- changed-files:
+  - any-glob-to-any-file:
+    - doc/**/*

@@ -1,24 +1,23 @@
 (storage-dir)=
 # Directory - `dir`
 
-```{youtube} https://www.youtube.com/watch?v=imWkPM9GjCY
-```
-
 The directory storage driver is a basic backend that stores its data in a standard file and directory structure.
 This driver is quick to set up and allows inspecting the files directly on the disk, which can be convenient for testing.
-However, LXD operations are {ref}`not optimized <storage-drivers-features>` for this driver.
+However, Incus operations are {ref}`not optimized <storage-drivers-features>` for this driver.
 
-## `dir` driver in LXD
+## `dir` driver in Incus
 
-The `dir` driver in LXD is fully functional and provides the same set of features as other drivers.
+The `dir` driver in Incus is fully functional and provides the same set of features as other drivers.
 However, it is much slower than all the other drivers because it must unpack images and do instant copies of instances, snapshots and images.
 
-Unless specified differently during creation (with the `source` configuration option), the data is stored in the `/var/snap/lxd/common/lxd/storage-pools/` (for snap installations) or `/var/lib/lxd/storage-pools/` directory.
+Unless specified differently during creation (with the `source` configuration option), the data is stored in the `/var/lib/incus/storage-pools/` directory.
 
 (storage-dir-quotas)=
 ### Quotas
 
+<!-- Include start dir quotas -->
 The `dir` driver supports storage quotas when running on either ext4 or XFS with project quotas enabled at the file system level.
+<!-- Include end dir quotas -->
 
 ## Configuration options
 
@@ -38,6 +37,10 @@ Key                           | Type                          | Default         
 
 Key                     | Type      | Condition                 | Default                                        | Description
 :--                     | :---      | :--------                 | :------                                        | :----------
+`initial.gid`           | int       | custom volume with content type `filesystem`  | same as `volume.initial.uid` or `0`           | GID of the volume owner in the instance
+`initial.mode`          | int       | custom volume with content type `filesystem`  | same as `volume.initial.mode` or `711`        | Mode  of the volume in the instance
+`initial.uid`           | int       | custom volume with content type `filesystem`  | same as `volume.initial.gid` or `0`           | UID of the volume owner in the instance
+`security.shared`       | bool      | custom block volume       | same as `volume.security.shared` or `false`    | Enable sharing the volume across multiple instances
 `security.shifted`      | bool      | custom volume             | same as `volume.security.shifted` or `false`   | {{enable_ID_shifting}}
 `security.unmapped`     | bool      | custom volume             | same as `volume.security.unmapped` or `false`  | Disable ID mapping for the volume
 `size`                  | string    | appropriate driver        | same as `volume.size`                          | Size/quota of the storage volume
@@ -49,7 +52,7 @@ Key                     | Type      | Condition                 | Default       
 
 ### Storage bucket configuration
 
-To enable storage buckets for local storage pool drivers and allow applications to access the buckets via the S3 protocol, you must configure the [`core.storage_buckets_address`](server-options-core) server setting.
+To enable storage buckets for local storage pool drivers and allow applications to access the buckets via the S3 protocol, you must configure the {config:option}`server-core:core.storage_buckets_address` server setting.
 
 Storage buckets do not have any configuration for `dir` pools.
 Unlike the other storage pool drivers, the `dir` driver does not support bucket quotas via the `size` setting.

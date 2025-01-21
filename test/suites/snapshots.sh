@@ -27,19 +27,19 @@ snapshots() {
   incus snapshot create foo
   # FIXME: make this backend agnostic
   if [ "$incus_backend" = "dir" ]; then
-    [ -d "${INCUS_DIR}/snapshots/foo/snap0" ]
+    [ -d "${INCUS_DIR}/containers-snapshots/foo/snap0" ]
   fi
 
   incus snapshot create foo
   # FIXME: make this backend agnostic
   if [ "$incus_backend" = "dir" ]; then
-    [ -d "${INCUS_DIR}/snapshots/foo/snap1" ]
+    [ -d "${INCUS_DIR}/containers-snapshots/foo/snap1" ]
   fi
 
   incus snapshot create foo tester
   # FIXME: make this backend agnostic
   if [ "$incus_backend" = "dir" ]; then
-    [ -d "${INCUS_DIR}/snapshots/foo/tester" ]
+    [ -d "${INCUS_DIR}/containers-snapshots/foo/tester" ]
   fi
 
   incus copy foo/tester foosnap1
@@ -48,16 +48,17 @@ snapshots() {
     [ -d "${INCUS_DIR}/containers/foosnap1/rootfs" ]
   fi
 
-  incus snapshot delete foo/snap0
+  incus snapshot delete foo snap0
   # FIXME: make this backend agnostic
   if [ "$incus_backend" = "dir" ]; then
-    [ ! -d "${INCUS_DIR}/snapshots/foo/snap0" ]
+    [ ! -d "${INCUS_DIR}/containers-snapshots/foo/snap0" ]
   fi
 
   # test deleting multiple snapshots
   incus snapshot create foo snap2
   incus snapshot create foo snap3
-  incus snapshot delete foo/snap2 foo/snap3
+  incus snapshot delete foo snap2
+  incus snapshot delete foo snap3
   ! incus info foo | grep -q snap2 || false
   ! incus info foo | grep -q snap3 || false
 
@@ -65,28 +66,28 @@ snapshots() {
   wait_for "${INCUS_ADDR}" my_curl -X POST "https://${INCUS_ADDR}/1.0/instances/foo/snapshots/tester" -d "{\"name\":\"tester2\"}"
   # FIXME: make this backend agnostic
   if [ "$incus_backend" = "dir" ]; then
-    [ ! -d "${INCUS_DIR}/snapshots/foo/tester" ]
+    [ ! -d "${INCUS_DIR}/containers-snapshots/foo/tester" ]
   fi
 
   incus snapshot rename foo tester2 tester-two
-  incus snapshot delete foo/tester-two
+  incus snapshot delete foo tester-two
   # FIXME: make this backend agnostic
   if [ "$incus_backend" = "dir" ]; then
-    [ ! -d "${INCUS_DIR}/snapshots/foo/tester-two" ]
+    [ ! -d "${INCUS_DIR}/containers-snapshots/foo/tester-two" ]
   fi
 
   incus snapshot create foo namechange
   # FIXME: make this backend agnostic
   if [ "$incus_backend" = "dir" ]; then
-    [ -d "${INCUS_DIR}/snapshots/foo/namechange" ]
+    [ -d "${INCUS_DIR}/containers-snapshots/foo/namechange" ]
   fi
   incus move foo foople
   [ ! -d "${INCUS_DIR}/containers/foo" ]
   [ -d "${INCUS_DIR}/containers/foople" ]
   # FIXME: make this backend agnostic
   if [ "$incus_backend" = "dir" ]; then
-    [ -d "${INCUS_DIR}/snapshots/foople/namechange" ]
-    [ -d "${INCUS_DIR}/snapshots/foople/namechange" ]
+    [ -d "${INCUS_DIR}/containers-snapshots/foople/namechange" ]
+    [ -d "${INCUS_DIR}/containers-snapshots/foople/namechange" ]
   fi
 
   incus delete foople
@@ -309,7 +310,7 @@ restore_and_compare_fs() {
   # FIXME: make this backend agnostic
   if [ "$(storage_backend "$INCUS_DIR")" = "dir" ]; then
     # Recursive diff of container FS
-    diff -r "${INCUS_DIR}/containers/bar/rootfs" "${INCUS_DIR}/snapshots/bar/${snap}/rootfs"
+    diff -r "${INCUS_DIR}/containers/bar/rootfs" "${INCUS_DIR}/containers-snapshots/bar/${snap}/rootfs"
   fi
 }
 
@@ -381,10 +382,10 @@ test_snap_volume_db_recovery() {
   incus snapshot create c1
   incus start c1
   incus stop -f c1
-  incusd sql global 'DELETE FROM storage_volumes_snapshots' # Remove volume snapshot DB records.
-  incusd sql local 'DELETE FROM  patches WHERE name = "storage_missing_snapshot_records"' # Clear patch indicator.
+  echo 'DELETE FROM storage_volumes_snapshots' | incus admin sql global - # Remove volume snapshot DB records.
+  echo 'DELETE FROM patches WHERE name = "storage_missing_snapshot_records"' | incus admin sql local - # Clear patch indicator.
   ! incus start c1 || false # Shouldn't be able to start as backup.yaml generation checks for DB consistency.
-  incusd shutdown
+  incus admin shutdown
   respawn_incus "${INCUS_DIR}" true
   incus storage volume snapshot show "${poolName}" container/c1/snap0 | grep "Auto repaired"
   incus storage volume snapshot show "${poolName}" container/c1/snap1 | grep "Auto repaired"

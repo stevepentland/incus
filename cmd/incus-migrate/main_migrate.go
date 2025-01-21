@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
@@ -17,14 +18,17 @@ import (
 	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/incusd/revert"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/osarch"
-	"github.com/lxc/incus/shared/units"
-	"github.com/lxc/incus/shared/version"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/linux"
+	"github.com/lxc/incus/v6/internal/version"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/archive"
+	"github.com/lxc/incus/v6/shared/osarch"
+	"github.com/lxc/incus/v6/shared/revert"
+	localtls "github.com/lxc/incus/v6/shared/tls"
+	"github.com/lxc/incus/v6/shared/units"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 type cmdMigrate struct {
@@ -57,6 +61,7 @@ func (c *cmdMigrate) Command() *cobra.Command {
 
 type cmdMigrateData struct {
 	SourcePath   string
+	SourceFormat string
 	Mounts       []string
 	InstanceArgs api.InstancesPost
 	Project      string
@@ -64,21 +69,23 @@ type cmdMigrateData struct {
 
 func (c *cmdMigrateData) Render() string {
 	data := struct {
-		Name        string            `yaml:"Name"`
-		Project     string            `yaml:"Project"`
-		Type        api.InstanceType  `yaml:"Type"`
-		Source      string            `yaml:"Source"`
-		Mounts      []string          `yaml:"Mounts,omitempty"`
-		Profiles    []string          `yaml:"Profiles,omitempty"`
-		StoragePool string            `yaml:"Storage pool,omitempty"`
-		StorageSize string            `yaml:"Storage pool size,omitempty"`
-		Network     string            `yaml:"Network name,omitempty"`
-		Config      map[string]string `yaml:"Config,omitempty"`
+		Name         string            `yaml:"Name"`
+		Project      string            `yaml:"Project"`
+		Type         api.InstanceType  `yaml:"Type"`
+		Source       string            `yaml:"Source"`
+		SourceFormat string            `yaml:"Source format,omitempty"`
+		Mounts       []string          `yaml:"Mounts,omitempty"`
+		Profiles     []string          `yaml:"Profiles,omitempty"`
+		StoragePool  string            `yaml:"Storage pool,omitempty"`
+		StorageSize  string            `yaml:"Storage pool size,omitempty"`
+		Network      string            `yaml:"Network name,omitempty"`
+		Config       map[string]string `yaml:"Config,omitempty"`
 	}{
 		c.InstanceArgs.Name,
 		c.Project,
 		c.InstanceArgs.Type,
 		c.SourcePath,
+		c.SourceFormat,
 		c.Mounts,
 		c.InstanceArgs.Profiles,
 		"",
@@ -111,8 +118,21 @@ func (c *cmdMigrateData) Render() string {
 }
 
 func (c *cmdMigrate) askServer() (incus.InstanceServer, string, error) {
+	// Detect local server.
+	local, err := c.connectLocal()
+	if err == nil {
+		useLocal, err := c.global.asker.AskBool("The local Incus server is the target [default=yes]: ", "yes")
+		if err != nil {
+			return nil, "", err
+		}
+
+		if useLocal {
+			return local, "", nil
+		}
+	}
+
 	// Server address
-	serverURL, err := cli.AskString("Please provide Incus server URL: ", "", nil)
+	serverURL, err := c.global.asker.AskString("Please provide Incus server URL: ", "", nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -123,31 +143,38 @@ func (c *cmdMigrate) askServer() (incus.InstanceServer, string, error) {
 	}
 
 	args := incus.ConnectionArgs{
-		UserAgent:          fmt.Sprintf("LXC-MIGRATE %s", version.Version),
-		InsecureSkipVerify: true,
+		UserAgent: fmt.Sprintf("LXC-MIGRATE %s", version.Version),
 	}
 
-	certificate, err := shared.GetRemoteCertificate(serverURL, args.UserAgent)
-	if err != nil {
-		return nil, "", fmt.Errorf("Failed to get remote certificate: %w", err)
-	}
-
-	digest := shared.CertFingerprint(certificate)
-
-	fmt.Println("Certificate fingerprint:", digest)
-	fmt.Print("ok (y/n)? ")
-	line, err := shared.ReadStdin()
-	if err != nil {
-		return nil, "", err
-	}
-
-	if len(line) < 1 || line[0] != 'y' && line[0] != 'Y' {
-		return nil, "", fmt.Errorf("Server certificate rejected by user")
-	}
-
+	// Attempt to connect
 	server, err := incus.ConnectIncus(serverURL, &args)
 	if err != nil {
-		return nil, "", fmt.Errorf("Failed to connect to server: %w", err)
+		// Failed to connect using the system CA, so retrieve the remote certificate.
+		certificate, err := localtls.GetRemoteCertificate(serverURL, args.UserAgent)
+		if err != nil {
+			return nil, "", fmt.Errorf("Failed to get remote certificate: %w", err)
+		}
+
+		digest := localtls.CertFingerprint(certificate)
+
+		fmt.Println("Certificate fingerprint:", digest)
+		fmt.Print("ok (y/n)? ")
+
+		buf := bufio.NewReader(os.Stdin)
+		line, _, err := buf.ReadLine()
+		if err != nil {
+			return nil, "", err
+		}
+
+		if len(line) < 1 || line[0] != 'y' && line[0] != 'Y' {
+			return nil, "", fmt.Errorf("Server certificate rejected by user")
+		}
+
+		args.InsecureSkipVerify = true
+		server, err = incus.ConnectIncus(serverURL, &args)
+		if err != nil {
+			return nil, "", fmt.Errorf("Failed to connect to server: %w", err)
+		}
 	}
 
 	apiServer, _, err := server.GetServer()
@@ -171,7 +198,7 @@ func (c *cmdMigrate) askServer() (incus.InstanceServer, string, error) {
 
 	i := 1
 
-	if shared.StringInSlice("tls", apiServer.AuthMethods) {
+	if slices.Contains(apiServer.AuthMethods, api.AuthenticationMethodTLS) {
 		fmt.Printf("%d) Use a certificate token\n", i)
 		availableAuthMethods = append(availableAuthMethods, authMethodTLSCertificateToken)
 		i++
@@ -182,8 +209,8 @@ func (c *cmdMigrate) askServer() (incus.InstanceServer, string, error) {
 		availableAuthMethods = append(availableAuthMethods, authMethodTLSTemporaryCertificate)
 	}
 
-	if len(apiServer.AuthMethods) > 1 || shared.StringInSlice("tls", apiServer.AuthMethods) {
-		authMethodInt, err := cli.AskInt("Please pick an authentication mechanism above: ", 1, int64(i), "", nil)
+	if len(apiServer.AuthMethods) > 1 || slices.Contains(apiServer.AuthMethods, api.AuthenticationMethodTLS) {
+		authMethodInt, err := c.global.asker.AskInt("Please pick an authentication mechanism above: ", 1, int64(i), "", nil)
 		if err != nil {
 			return nil, "", err
 		}
@@ -196,8 +223,8 @@ func (c *cmdMigrate) askServer() (incus.InstanceServer, string, error) {
 	var token string
 
 	if authMethod == authMethodTLSCertificate {
-		certPath, err = cli.AskString("Please provide the certificate path: ", "", func(path string) error {
-			if !shared.PathExists(path) {
+		certPath, err = c.global.asker.AskString("Please provide the certificate path: ", "", func(path string) error {
+			if !util.PathExists(path) {
 				return errors.New("File does not exist")
 			}
 
@@ -207,8 +234,8 @@ func (c *cmdMigrate) askServer() (incus.InstanceServer, string, error) {
 			return nil, "", err
 		}
 
-		keyPath, err = cli.AskString("Please provide the keyfile path: ", "", func(path string) error {
-			if !shared.PathExists(path) {
+		keyPath, err = c.global.asker.AskString("Please provide the keyfile path: ", "", func(path string) error {
+			if !util.PathExists(path) {
 				return errors.New("File does not exist")
 			}
 
@@ -218,8 +245,8 @@ func (c *cmdMigrate) askServer() (incus.InstanceServer, string, error) {
 			return nil, "", err
 		}
 	} else if authMethod == authMethodTLSCertificateToken {
-		token, err = cli.AskString("Please provide the certificate token: ", "", func(token string) error {
-			_, err := shared.CertificateTokenDecode(token)
+		token, err = c.global.asker.AskString("Please provide the certificate token: ", "", func(token string) error {
+			_, err := localtls.CertificateTokenDecode(token)
 			if err != nil {
 				return err
 			}
@@ -235,10 +262,10 @@ func (c *cmdMigrate) askServer() (incus.InstanceServer, string, error) {
 
 	switch authMethod {
 	case authMethodTLSCertificate, authMethodTLSTemporaryCertificate, authMethodTLSCertificateToken:
-		authType = "tls"
+		authType = api.AuthenticationMethodTLS
 	}
 
-	return connectTarget(serverURL, certPath, keyPath, authType, token)
+	return c.connectTarget(serverURL, certPath, keyPath, authType, token)
 }
 
 func (c *cmdMigrate) RunInteractive(server incus.InstanceServer) (cmdMigrateData, error) {
@@ -257,7 +284,7 @@ func (c *cmdMigrate) RunInteractive(server incus.InstanceServer) (cmdMigrateData
 	config.InstanceArgs.Devices = map[string]map[string]string{}
 
 	// Provide instance type
-	instanceType, err := cli.AskInt("Would you like to create a container (1) or virtual-machine (2)?: ", 1, 2, "1", nil)
+	instanceType, err := c.global.asker.AskInt("Would you like to create a container (1) or virtual-machine (2)?: ", 1, 2, "1", nil)
 	if err != nil {
 		return cmdMigrateData{}, err
 	}
@@ -275,14 +302,15 @@ func (c *cmdMigrate) RunInteractive(server incus.InstanceServer) (cmdMigrateData
 	}
 
 	if len(projectNames) > 1 {
-		project, err := cli.AskChoice("Project to create the instance in [default=default]: ", projectNames, "default")
+		project, err := c.global.asker.AskChoice("Project to create the instance in [default=default]: ", projectNames, api.ProjectDefaultName)
 		if err != nil {
 			return cmdMigrateData{}, err
 		}
 
 		config.Project = project
+		server = server.UseProject(config.Project)
 	} else {
-		config.Project = "default"
+		config.Project = api.ProjectDefaultName
 	}
 
 	// Instance name
@@ -292,12 +320,12 @@ func (c *cmdMigrate) RunInteractive(server incus.InstanceServer) (cmdMigrateData
 	}
 
 	for {
-		instanceName, err := cli.AskString("Name of the new instance: ", "", nil)
+		instanceName, err := c.global.asker.AskString("Name of the new instance: ", "", nil)
 		if err != nil {
 			return cmdMigrateData{}, err
 		}
 
-		if shared.StringInSlice(instanceName, instanceNames) {
+		if slices.Contains(instanceNames, instanceName) {
 			fmt.Printf("Instance %q already exists\n", instanceName)
 			continue
 		}
@@ -310,19 +338,34 @@ func (c *cmdMigrate) RunInteractive(server incus.InstanceServer) (cmdMigrateData
 
 	// Provide source path
 	if config.InstanceArgs.Type == api.InstanceTypeVM {
-		question = "Please provide the path to a disk, partition, or image file: "
+		question = "Please provide the path to a disk, partition, or qcow2/raw/vmdk image file: "
 	} else {
 		question = "Please provide the path to a root filesystem: "
 	}
 
-	config.SourcePath, err = cli.AskString(question, "", func(s string) error {
-		if !shared.PathExists(s) {
+	config.SourcePath, err = c.global.asker.AskString(question, "", func(s string) error {
+		if !util.PathExists(s) {
 			return errors.New("Path does not exist")
 		}
 
 		_, err := os.Stat(s)
 		if err != nil {
 			return err
+		}
+
+		// When migrating a VM, report the detected source format
+		if config.InstanceArgs.Type == api.InstanceTypeVM {
+			if linux.IsBlockdevPath(s) {
+				config.SourceFormat = "Block device"
+			} else if _, ext, _, _ := archive.DetectCompression(s); ext == ".qcow2" {
+				config.SourceFormat = "qcow2"
+			} else if _, ext, _, _ := archive.DetectCompression(s); ext == ".vmdk" {
+				config.SourceFormat = "vmdk"
+			} else {
+				// If the input isn't a block device or qcow2/vmdk image, assume it's raw.
+				// Positively identifying a raw image depends on parsing MBR/GPT partition tables.
+				config.SourceFormat = "raw"
+			}
 		}
 
 		return nil
@@ -334,13 +377,23 @@ func (c *cmdMigrate) RunInteractive(server incus.InstanceServer) (cmdMigrateData
 	if config.InstanceArgs.Type == api.InstanceTypeVM {
 		architectureName, _ := osarch.ArchitectureGetLocal()
 
-		if shared.StringInSlice(architectureName, []string{"x86_64", "aarch64"}) {
-			hasSecureBoot, err := cli.AskBool("Does the VM support UEFI Secure Boot? [default=no]: ", "no")
+		if slices.Contains([]string{"x86_64", "aarch64"}, architectureName) {
+			hasUEFI, err := c.global.asker.AskBool("Does the VM support UEFI booting? [default=yes]: ", "yes")
 			if err != nil {
 				return cmdMigrateData{}, err
 			}
 
-			if !hasSecureBoot {
+			if hasUEFI {
+				hasSecureBoot, err := c.global.asker.AskBool("Does the VM support UEFI Secure Boot? [default=yes]: ", "yes")
+				if err != nil {
+					return cmdMigrateData{}, err
+				}
+
+				if !hasSecureBoot {
+					config.InstanceArgs.Config["security.secureboot"] = "false"
+				}
+			} else {
+				config.InstanceArgs.Config["security.csm"] = "true"
 				config.InstanceArgs.Config["security.secureboot"] = "false"
 			}
 		}
@@ -350,16 +403,16 @@ func (c *cmdMigrate) RunInteractive(server incus.InstanceServer) (cmdMigrateData
 
 	// Additional mounts for containers
 	if config.InstanceArgs.Type == api.InstanceTypeContainer {
-		addMounts, err := cli.AskBool("Do you want to add additional filesystem mounts? [default=no]: ", "no")
+		addMounts, err := c.global.asker.AskBool("Do you want to add additional filesystem mounts? [default=no]: ", "no")
 		if err != nil {
 			return cmdMigrateData{}, err
 		}
 
 		if addMounts {
 			for {
-				path, err := cli.AskString("Please provide a path the filesystem mount path [empty value to continue]: ", "", func(s string) error {
+				path, err := c.global.asker.AskString("Please provide a path the filesystem mount path [empty value to continue]: ", "", func(s string) error {
 					if s != "" {
-						if shared.PathExists(s) {
+						if util.PathExists(s) {
 							return nil
 						}
 
@@ -401,7 +454,7 @@ Additional overrides can be applied at this stage:
 
 `)
 
-		choice, err := cli.AskInt("Please pick one of the options above [default=1]: ", 1, 5, "1", nil)
+		choice, err := c.global.asker.AskInt("Please pick one of the options above [default=1]: ", 1, 5, "1", nil)
 		if err != nil {
 			return cmdMigrateData{}, err
 		}
@@ -454,7 +507,11 @@ func (c *cmdMigrate) Run(cmd *cobra.Command, args []string) error {
 		}
 
 		cancel()
-		os.Exit(1)
+
+		// The following nolint directive ignores the "deep-exit" rule of the revive linter.
+		// We should be exiting cleanly by passing the above context into each invoked method and checking for
+		// cancellation. Unfortunately our client methods do not accept a context argument.
+		os.Exit(1) //nolint:revive
 	}()
 
 	if clientFingerprint != "" {
@@ -499,7 +556,15 @@ func (c *cmdMigrate) Run(cmd *cobra.Command, args []string) error {
 
 	// Automatically clean-up the temporary path on exit
 	defer func(path string) {
+		// Unmount the path if it's a mountpoint.
 		_ = unix.Unmount(path, unix.MNT_DETACH)
+		_ = unix.Unmount(filepath.Join(path, "root.img"), unix.MNT_DETACH)
+
+		// Cleanup VM image files.
+		_ = os.Remove(filepath.Join(path, "converted-raw-image.img"))
+		_ = os.Remove(filepath.Join(path, "root.img"))
+
+		// Remove the directory itself.
 		_ = os.Remove(path)
 	}(path)
 
@@ -520,6 +585,44 @@ func (c *cmdMigrate) Run(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("Failed to setup the source: %w", err)
 		}
 	} else {
+		_, ext, convCmd, _ := archive.DetectCompression(config.SourcePath)
+		if ext == ".qcow2" || ext == ".vmdk" {
+			destImg := filepath.Join(path, "converted-raw-image.img")
+
+			cmd := []string{
+				"nice", "-n19", // Run with low priority to reduce CPU impact on other processes.
+			}
+
+			cmd = append(cmd, convCmd...)
+			cmd = append(cmd, "-p", "-t", "writeback")
+
+			// Check for Direct I/O support.
+			from, err := os.OpenFile(config.SourcePath, unix.O_DIRECT|unix.O_RDONLY, 0)
+			if err == nil {
+				cmd = append(cmd, "-T", "none")
+				_ = from.Close()
+			}
+
+			to, err := os.OpenFile(destImg, unix.O_DIRECT|unix.O_RDONLY, 0)
+			if err == nil {
+				cmd = append(cmd, "-t", "none")
+				_ = to.Close()
+			}
+
+			cmd = append(cmd, config.SourcePath, destImg)
+
+			fmt.Printf("Converting image %q to raw format before importing\n", config.SourcePath)
+
+			c := exec.Command(cmd[0], cmd[1:]...)
+			err = c.Run()
+
+			if err != nil {
+				return fmt.Errorf("Failed to convert image %q for importing: %w", config.SourcePath, err)
+			}
+
+			config.SourcePath = destImg
+		}
+
 		fullPath = path
 		target := filepath.Join(path, "root.img")
 
@@ -586,7 +689,7 @@ func (c *cmdMigrate) askProfiles(server incus.InstanceServer, config *cmdMigrate
 		return err
 	}
 
-	profiles, err := cli.AskString("Which profiles do you want to apply to the instance? (space separated) [default=default, \"-\" for none]: ", "default", func(s string) error {
+	profiles, err := c.global.asker.AskString("Which profiles do you want to apply to the instance? (space separated) [default=default, \"-\" for none]: ", "default", func(s string) error {
 		// This indicates that no profiles should be applied.
 		if s == "-" {
 			return nil
@@ -595,7 +698,7 @@ func (c *cmdMigrate) askProfiles(server incus.InstanceServer, config *cmdMigrate
 		profiles := strings.Split(s, " ")
 
 		for _, profile := range profiles {
-			if !shared.StringInSlice(profile, profileNames) {
+			if !slices.Contains(profileNames, profile) {
 				return fmt.Errorf("Unknown profile %q", profile)
 			}
 		}
@@ -614,7 +717,7 @@ func (c *cmdMigrate) askProfiles(server incus.InstanceServer, config *cmdMigrate
 }
 
 func (c *cmdMigrate) askConfig(config *cmdMigrateData) error {
-	configs, err := cli.AskString("Please specify config keys and values (key=value ...): ", "", func(s string) error {
+	configs, err := c.global.asker.AskString("Please specify config keys and values (key=value ...): ", "", func(s string) error {
 		if s == "" {
 			return nil
 		}
@@ -632,8 +735,8 @@ func (c *cmdMigrate) askConfig(config *cmdMigrateData) error {
 	}
 
 	for _, entry := range strings.Split(configs, " ") {
-		fields := strings.SplitN(entry, "=", 2)
-		config.InstanceArgs.Config[fields[0]] = fields[1]
+		key, value, _ := strings.Cut(entry, "=")
+		config.InstanceArgs.Config[key] = value
 	}
 
 	return nil
@@ -649,7 +752,7 @@ func (c *cmdMigrate) askStorage(server incus.InstanceServer, config *cmdMigrateD
 		return fmt.Errorf("No storage pools available")
 	}
 
-	storagePool, err := cli.AskChoice("Please provide the storage pool to use: ", storagePools, "")
+	storagePool, err := c.global.asker.AskChoice("Please provide the storage pool to use: ", storagePools, "")
 	if err != nil {
 		return err
 	}
@@ -660,13 +763,13 @@ func (c *cmdMigrate) askStorage(server incus.InstanceServer, config *cmdMigrateD
 		"path": "/",
 	}
 
-	changeStorageSize, err := cli.AskBool("Do you want to change the storage size? [default=no]: ", "no")
+	changeStorageSize, err := c.global.asker.AskBool("Do you want to change the storage size? [default=no]: ", "no")
 	if err != nil {
 		return err
 	}
 
 	if changeStorageSize {
-		size, err := cli.AskString("Please specify the storage size: ", "", func(s string) error {
+		size, err := c.global.asker.AskString("Please specify the storage size: ", "", func(s string) error {
 			_, err := units.ParseByteSizeString(s)
 			return err
 		})
@@ -686,7 +789,7 @@ func (c *cmdMigrate) askNetwork(server incus.InstanceServer, config *cmdMigrateD
 		return err
 	}
 
-	network, err := cli.AskChoice("Please specify the network to use for the instance: ", networks, "")
+	network, err := c.global.asker.AskChoice("Please specify the network to use for the instance: ", networks, "")
 	if err != nil {
 		return err
 	}

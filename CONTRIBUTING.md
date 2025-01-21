@@ -1,32 +1,47 @@
 # Contributing
 
+<!-- Include start contributing -->
+
+The Incus team appreciates contributions to the project, through pull requests, issues on the [GitHub repository](https://github.com/lxc/incus/issues), or discussions or questions on the [forum](https://discuss.linuxcontainers.org).
+
 Check the following guidelines before contributing to the project.
+
+## Code of Conduct
+
+When contributing, you must adhere to the Code of Conduct, which is available at: [`https://github.com/lxc/incus/blob/main/CODE_OF_CONDUCT.md`](https://github.com/lxc/incus/blob/main/CODE_OF_CONDUCT.md)
+
+## License and copyright
+
+By default, any contribution to this project is made under the Apache
+2.0 license.
+
+The author of a change remains the copyright holder of their code
+(no copyright assignment).
 
 ## Pull requests
 
 Changes to this project should be proposed as pull requests on GitHub
 at: [`https://github.com/lxc/incus`](https://github.com/lxc/incus)
 
-Proposed changes will then go through code review there and once approved,
+Proposed changes will then go through review there and once approved,
 be merged in the main branch.
 
-## Commit structure
+### Commit structure
 
 Separate commits should be used for:
 
-- API extension (`api: Add XYZ extension`, contains `doc/api-extensions.md` and `shared/version.api.go`)
+- API extension (`api: Add XYZ extension`, contains `doc/api-extensions.md` and `internal/version/api.go`)
 - Documentation (`doc: Update XYZ` for files in `doc/`)
 - API structure (`shared/api: Add XYZ` for changes to `shared/api/`)
 - Go client package (`client: Add XYZ` for changes to `client/`)
-- CLI (`lxc/<command>: Change XYZ` for changes to `lxc/`)
-- Scripts (`scripts: Update bash completion for XYZ` for changes to `scripts/`)
+- CLI (`cmd/<command>: Change XYZ` for changes to `cmd/`)
 - Incus daemon (`incus/<package>: Add support for XYZ` for changes to `incus/`)
 - Tests (`tests: Add test for XYZ` for changes to `tests/`)
 
 The same kind of pattern extends to the other tools in the Incus code tree
 and depending on complexity, things may be split into even smaller chunks.
 
-When updating strings in the CLI tool (`lxc/`), you may need a commit to update the templates:
+When updating strings in the CLI tool (`cmd/`), you may need a commit to update the templates:
 
     make i18n
     git commit -a -s -m "i18n: Update translation templates" po/
@@ -39,15 +54,7 @@ When updating API (`shared/api`), you may need a commit to update the swagger YA
 This structure makes it easier for contributions to be reviewed and also
 greatly simplifies the process of back-porting fixes to stable branches.
 
-## License and copyright
-
-By default, any contribution to this project is made under the Apache
-2.0 license.
-
-The author of a change remains the copyright holder of their code
-(no copyright assignment).
-
-## Developer Certificate of Origin
+### Developer Certificate of Origin
 
 To improve tracking of contributions to this project we use the DCO 1.1
 and use a "sign-off" procedure for all changes going into the branch.
@@ -106,12 +113,8 @@ Sorry, no anonymous contributions are allowed.
 We also require each commit be individually signed-off by their author,
 even when part of a larger set. You may find `git commit -s` useful.
 
-## Code of Conduct
-
-When contributing, you must adhere to the Code of Conduct, which is available at: [`https://github.com/lxc/incus/blob/main/CODE_OF_CONDUCT.md`](https://github.com/lxc/incus/blob/main/CODE_OF_CONDUCT.md)
-
 <!-- Include end contributing -->
 
 ## More information
 
-For more information, see [Contributing](https://linuxcontainers.org/incus/doc/main/contributing/) in the documentation.
+For more information, see [Contributing](https://linuxcontainers.org/incus/docs/main/contributing/) in the documentation.

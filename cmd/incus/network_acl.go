@@ -11,11 +11,10 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/termios"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/termios"
 )
 
 type cmdNetworkACL struct {
@@ -83,7 +82,8 @@ type cmdNetworkACLList struct {
 	global     *cmdGlobal
 	networkACL *cmdNetworkACL
 
-	flagFormat string
+	flagFormat      string
+	flagAllProjects bool
 }
 
 func (c *cmdNetworkACLList) Command() *cobra.Command {
@@ -94,7 +94,20 @@ func (c *cmdNetworkACLList) Command() *cobra.Command {
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("List available network ACL"))
 
 	cmd.RunE = c.Run
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
+	cmd.Flags().BoolVar(&c.flagAllProjects, "all-projects", false, i18n.G("List network ACLs across all projects"))
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpRemotes(toComplete, false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -124,9 +137,17 @@ func (c *cmdNetworkACLList) Run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf(i18n.G("Filtering isn't supported yet"))
 	}
 
-	acls, err := resource.server.GetNetworkACLs()
-	if err != nil {
-		return err
+	var acls []api.NetworkACL
+	if c.flagAllProjects {
+		acls, err = resource.server.GetNetworkACLsAllProjects()
+		if err != nil {
+			return err
+		}
+	} else {
+		acls, err = resource.server.GetNetworkACLs()
+		if err != nil {
+			return err
+		}
 	}
 
 	data := [][]string{}
@@ -136,6 +157,10 @@ func (c *cmdNetworkACLList) Run(cmd *cobra.Command, args []string) error {
 			acl.Name,
 			acl.Description,
 			strUsedBy,
+		}
+
+		if c.flagAllProjects {
+			details = append([]string{acl.Project}, details...)
 		}
 
 		data = append(data, details)
@@ -149,7 +174,11 @@ func (c *cmdNetworkACLList) Run(cmd *cobra.Command, args []string) error {
 		i18n.G("USED BY"),
 	}
 
-	return cli.RenderTable(c.flagFormat, header, data, acls)
+	if c.flagAllProjects {
+		header = append([]string{i18n.G("PROJECT")}, header...)
+	}
+
+	return cli.RenderTable(os.Stdout, c.flagFormat, header, data, acls)
 }
 
 // Show.
@@ -164,6 +193,14 @@ func (c *cmdNetworkACLShow) Command() *cobra.Command {
 	cmd.Short = i18n.G("Show network ACL configurations")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Show network ACL configurations"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworkACLs(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -218,6 +255,14 @@ func (c *cmdNetworkACLShowLog) Command() *cobra.Command {
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Show network ACL log"))
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworkACLs(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -267,6 +312,18 @@ func (c *cmdNetworkACLGet) Command() *cobra.Command {
 
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Get the key as a network ACL property"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworkACLs(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkACLConfigs(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -318,6 +375,8 @@ func (c *cmdNetworkACLGet) Run(cmd *cobra.Command, args []string) error {
 type cmdNetworkACLCreate struct {
 	global     *cmdGlobal
 	networkACL *cmdNetworkACL
+
+	flagDescription string
 }
 
 func (c *cmdNetworkACLCreate) Command() *cobra.Command {
@@ -325,8 +384,22 @@ func (c *cmdNetworkACLCreate) Command() *cobra.Command {
 	cmd.Use = usage("create", i18n.G("[<remote>:]<ACL> [key=value...]"))
 	cmd.Short = i18n.G("Create new network ACLs")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Create new network ACLs"))
+	cmd.Example = cli.FormatSection("", i18n.G(`incus network acl create a1
+
+incus network acl create a1 < config.yaml
+    Create network acl with configuration from config.yaml`))
+
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Network ACL description")+"``")
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworkACLs(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -370,6 +443,10 @@ func (c *cmdNetworkACLCreate) Run(cmd *cobra.Command, args []string) error {
 			Name: resource.name,
 		},
 		NetworkACLPut: aclPut,
+	}
+
+	if c.flagDescription != "" {
+		acl.Description = c.flagDescription
 	}
 
 	if acl.Config == nil {
@@ -417,6 +494,14 @@ For backward compatibility, a single configuration key may still be set with:
 
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Set the key as a network ACL property"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworkACLs(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -493,6 +578,19 @@ func (c *cmdNetworkACLUnset) Command() *cobra.Command {
 	cmd.RunE = c.Run
 
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Unset the key as a network ACL property"))
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworkACLs(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkACLConfigs(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -522,6 +620,14 @@ func (c *cmdNetworkACLEdit) Command() *cobra.Command {
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Edit network ACL configurations as YAML"))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworkACLs(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -602,7 +708,7 @@ func (c *cmdNetworkACLEdit) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Spawn the editor.
-	content, err := shared.TextEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
+	content, err := textEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
 	if err != nil {
 		return err
 	}
@@ -625,7 +731,7 @@ func (c *cmdNetworkACLEdit) Run(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			content, err = shared.TextEditor("", content)
+			content, err = textEditor("", content)
 			if err != nil {
 				return err
 			}
@@ -652,6 +758,14 @@ func (c *cmdNetworkACLRename) Command() *cobra.Command {
 	cmd.Short = i18n.G("Rename network ACLs")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Rename network ACLs"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworkACLs(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -702,6 +816,14 @@ func (c *cmdNetworkACLDelete) Command() *cobra.Command {
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Delete network ACLs"))
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworkACLs(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -742,6 +864,7 @@ type cmdNetworkACLRule struct {
 	global          *cmdGlobal
 	networkACL      *cmdNetworkACL
 	flagRemoveForce bool
+	flagDescription string
 }
 
 func (c *cmdNetworkACLRule) Command() *cobra.Command {
@@ -764,13 +887,32 @@ func (c *cmdNetworkACLRule) CommandAdd() *cobra.Command {
 	cmd.Use = usage("add", i18n.G("[<remote>:]<ACL> <direction> <key>=<value>..."))
 	cmd.Short = i18n.G("Add rules to an ACL")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Add rules to an ACL"))
+
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Rule description")+"``")
+
 	cmd.RunE = c.RunAdd
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworkACLs(toComplete)
+		}
+
+		if len(args) == 1 {
+			return []string{"ingress", "egress"}, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		if len(args) == 2 {
+			return c.global.cmpNetworkACLRuleProperties()
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
 
-// ruleJSONStructFieldMap returns a map of JSON tag names to struct field indices for api.NetworkACLRule.
-func (c *cmdNetworkACLRule) ruleJSONStructFieldMap() map[string]int {
+// networkACLRuleJSONStructFieldMap returns a map of JSON tag names to struct field indices for api.NetworkACLRule.
+func networkACLRuleJSONStructFieldMap() map[string]int {
 	// Use reflect to get field names in rule from json tags.
 	ruleType := reflect.TypeOf(api.NetworkACLRule{})
 	allowedKeys := make(map[string]int, ruleType.NumField())
@@ -802,9 +944,9 @@ func (c *cmdNetworkACLRule) ruleJSONStructFieldMap() map[string]int {
 // parseConfigKeysToRule converts a map of key/value pairs into an api.NetworkACLRule using reflection.
 func (c *cmdNetworkACLRule) parseConfigToRule(config map[string]string) (*api.NetworkACLRule, error) {
 	// Use reflect to get struct field indices in NetworkACLRule for json tags.
-	allowedKeys := c.ruleJSONStructFieldMap()
+	allowedKeys := networkACLRuleJSONStructFieldMap()
 
-	// Initialise new rule.
+	// Initialize new rule.
 	rule := api.NetworkACLRule{}
 	ruleValue := reflect.ValueOf(&rule).Elem()
 
@@ -861,6 +1003,10 @@ func (c *cmdNetworkACLRule) RunAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	if c.flagDescription != "" {
+		rule.Description = c.flagDescription
+	}
+
 	rule.Normalise() // Strip space.
 
 	// Default to enabled if not specified.
@@ -888,6 +1034,22 @@ func (c *cmdNetworkACLRule) CommandRemove() *cobra.Command {
 	cmd.Flags().BoolVar(&c.flagRemoveForce, "force", false, i18n.G("Remove all rules that match"))
 
 	cmd.RunE = c.RunRemove
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworkACLs(toComplete)
+		}
+
+		if len(args) == 1 {
+			return []string{"ingress", "egress"}, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		if len(args) == 2 {
+			return c.global.cmpNetworkACLRuleProperties()
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -924,7 +1086,7 @@ func (c *cmdNetworkACLRule) RunRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	// Use reflect to get struct field indices in NetworkACLRule for json tags.
-	allowedKeys := c.ruleJSONStructFieldMap()
+	allowedKeys := networkACLRuleJSONStructFieldMap()
 
 	// Check the supplied filters match possible fields.
 	for k := range filters {

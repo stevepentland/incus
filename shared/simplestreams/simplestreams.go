@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,14 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	"github.com/lxc/incus/shared/osarch"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/osarch"
+	"github.com/lxc/incus/v6/shared/util"
 )
-
-var urlDefaultOS = map[string]string{
-	"https://cloud-images.ubuntu.com": "ubuntu",
-}
 
 // DownloadableFile represents a file with its URL, hash and size.
 type DownloadableFile struct {
@@ -35,6 +32,14 @@ func NewClient(url string, httpClient http.Client, useragent string) *SimpleStre
 		url:            url,
 		cachedProducts: map[string]*Products{},
 		useragent:      useragent,
+	}
+}
+
+// NewLocalClient returns a simplestreams client for a local filesystem path.
+func NewLocalClient(path string) *SimpleStreams {
+	return &SimpleStreams{
+		url:            path,
+		cachedProducts: map[string]*Products{},
 	}
 }
 
@@ -66,7 +71,7 @@ func (s *SimpleStreams) readCache(path string) ([]byte, bool) {
 		return nil, false
 	}
 
-	if !shared.PathExists(cacheName) {
+	if !util.PathExists(cacheName) {
 		return nil, false
 	}
 
@@ -87,18 +92,37 @@ func (s *SimpleStreams) readCache(path string) ([]byte, bool) {
 	return body, expired
 }
 
+// InvalidateCache removes the on-disk cache for the SimpleStreams remote.
+func (s *SimpleStreams) InvalidateCache() {
+	_ = os.RemoveAll(s.cachePath)
+}
+
 func (s *SimpleStreams) cachedDownload(path string) ([]byte, error) {
 	fields := strings.Split(path, "/")
 	fileName := fields[len(fields)-1]
 
-	// Attempt to get from the cache
+	// Handle local filesystem reads (bypass cache).
+	if s.http == nil {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(body) == 0 {
+			return nil, fmt.Errorf("Empty index file %q", path)
+		}
+
+		return body, nil
+	}
+
+	// Attempt to get from the cache.
 	cachedBody, expired := s.readCache(fileName)
 	if cachedBody != nil && !expired {
 		return cachedBody, nil
 	}
 
-	// Download from the source
-	uri, err := shared.JoinUrls(s.url, path)
+	// Download from the remote URL.
+	uri, err := url.JoinPath(s.url, path)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +170,7 @@ func (s *SimpleStreams) cachedDownload(path string) ([]byte, error) {
 	if s.cachePath != "" {
 		cacheName := filepath.Join(s.cachePath, fileName)
 		_ = os.Remove(cacheName)
-		_ = os.WriteFile(cacheName, body, 0644)
+		_ = os.WriteFile(cacheName, body, 0o644)
 	}
 
 	return body, nil
@@ -163,7 +187,7 @@ func (s *SimpleStreams) parseStream() (*Stream, error) {
 		return nil, err
 	}
 
-	pathURL, _ := shared.JoinUrls(s.url, path)
+	pathURL, _ := url.JoinPath(s.url, path)
 
 	// Parse the idnex
 	stream := Stream{}
@@ -212,20 +236,7 @@ func (s *SimpleStreams) applyAliases(images []api.Image) ([]api.Image, []extende
 	// Sort the images so we tag the preferred ones
 	sort.Sort(sortedImages(images))
 
-	// Look for the default OS
-	defaultOS := ""
-	for k, v := range urlDefaultOS {
-		if strings.HasPrefix(s.url, k) {
-			defaultOS = v
-			break
-		}
-	}
-
 	addAlias := func(imageType string, architecture string, name string, fingerprint string) *api.ImageAlias {
-		if defaultOS != "" {
-			name = strings.TrimPrefix(name, fmt.Sprintf("%s/", defaultOS))
-		}
-
 		for _, entry := range aliasesList {
 			if entry.Name == name && entry.Type == imageType && entry.Architecture == architecture {
 				return nil
@@ -357,6 +368,10 @@ func (s *SimpleStreams) GetFiles(fingerprint string) (map[string]DownloadableFil
 				files := map[string]DownloadableFile{}
 
 				for _, path := range downloads[image.Fingerprint] {
+					if len(path) < 4 {
+						return nil, fmt.Errorf("Invalid path content: %q", path)
+					}
+
 					size, err := strconv.ParseInt(path[3], 10, 64)
 					if err != nil {
 						return nil, err
@@ -365,7 +380,8 @@ func (s *SimpleStreams) GetFiles(fingerprint string) (map[string]DownloadableFil
 					files[path[2]] = DownloadableFile{
 						Path:   path[0],
 						Sha256: path[1],
-						Size:   size}
+						Size:   size,
+					}
 				}
 
 				return files, nil

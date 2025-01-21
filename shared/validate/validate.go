@@ -2,38 +2,28 @@ package validate
 
 import (
 	"bytes"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"net"
 	"net/url"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/kballard/go-shellquote"
-	"github.com/pborman/uuid"
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/shared/osarch"
-	"github.com/lxc/incus/shared/units"
+	"github.com/lxc/incus/v6/shared/osarch"
+	"github.com/lxc/incus/v6/shared/units"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
-// stringInSlice checks whether the supplied string is present in the supplied slice.
-func stringInSlice(key string, list []string) bool {
-	for _, entry := range list {
-		if entry == key {
-			return true
-		}
-	}
-	return false
-}
-
-// Required returns function that runs one or more validators, all must pass without error.
-func Required(validators ...func(value string) error) func(value string) error {
+// And returns a function that runs one or more validators, all must pass without error.
+func And(validators ...func(value string) error) func(value string) error {
 	return func(value string) error {
 		for _, validator := range validators {
 			err := validator(value)
@@ -44,6 +34,25 @@ func Required(validators ...func(value string) error) func(value string) error {
 
 		return nil
 	}
+}
+
+// Or returns a function that runs one or more validators, at least one must pass without error.
+func Or(validators ...func(value string) error) func(value string) error {
+	return func(value string) error {
+		for _, validator := range validators {
+			err := validator(value)
+			if err == nil {
+				return nil
+			}
+		}
+
+		return fmt.Errorf("%q isn't a valid value", value)
+	}
+}
+
+// Required returns a function that runs one or more validators, all must pass without error.
+func Required(validators ...func(value string) error) func(value string) error {
+	return And(validators...)
 }
 
 // Optional wraps Required() function to make it return nil if value is empty string.
@@ -87,41 +96,9 @@ func IsUint32(value string) error {
 	return nil
 }
 
-// ParseUint32Range parses a uint32 range in the form "number" or "start-end".
-// Returns the start number and the size of the range.
-func ParseUint32Range(value string) (uint32, uint32, error) {
-	rangeParts := strings.SplitN(value, "-", 2)
-	rangeLen := len(rangeParts)
-	if rangeLen != 1 && rangeLen != 2 {
-		return 0, 0, fmt.Errorf("Range must contain a single number or start and end numbers")
-	}
-
-	startNum, err := strconv.ParseUint(rangeParts[0], 10, 32)
-	if err != nil {
-		return 0, 0, fmt.Errorf("Invalid number %q", value)
-	}
-
-	var rangeSize uint32 = 1
-
-	if rangeLen == 2 {
-		endNum, err := strconv.ParseUint(rangeParts[1], 10, 32)
-		if err != nil {
-			return 0, 0, fmt.Errorf("Invalid end number %q", value)
-		}
-
-		if startNum >= endNum {
-			return 0, 0, fmt.Errorf("Start number %d must be lower than end number %d", startNum, endNum)
-		}
-
-		rangeSize += uint32(endNum) - uint32(startNum)
-	}
-
-	return uint32(startNum), rangeSize, nil
-}
-
 // IsUint32Range validates whether the string is a uint32 range in the form "number" or "start-end".
 func IsUint32Range(value string) error {
-	_, _, err := ParseUint32Range(value)
+	_, _, err := util.ParseUint32Range(value)
 	return err
 }
 
@@ -157,7 +134,7 @@ func IsPriority(value string) error {
 
 // IsBool validates if string can be understood as a bool.
 func IsBool(value string) error {
-	if !stringInSlice(strings.ToLower(value), []string{"true", "false", "yes", "no", "1", "0", "on", "off"}) {
+	if !slices.Contains([]string{"true", "false", "yes", "no", "1", "0", "on", "off"}, strings.ToLower(value)) {
 		return fmt.Errorf("Invalid value for a boolean %q", value)
 	}
 
@@ -167,7 +144,7 @@ func IsBool(value string) error {
 // IsOneOf checks whether the string is present in the supplied slice of strings.
 func IsOneOf(valid ...string) func(value string) error {
 	return func(value string) error {
-		if !stringInSlice(value, valid) {
+		if !slices.Contains(valid, value) {
 			return fmt.Errorf("Invalid value %q (not one of %s)", value, valid)
 		}
 
@@ -245,6 +222,25 @@ func IsInterfaceName(value string) error {
 	return nil
 }
 
+// IsNetworkName validates a name usable for a network.
+func IsNetworkName(value string) error {
+	err := IsInterfaceName(value)
+	if err != nil {
+		return err
+	}
+
+	err = IsURLSegmentSafe(value)
+	if err != nil {
+		return err
+	}
+
+	if strings.Contains(value, ":") {
+		return fmt.Errorf("Cannot contain %q", ":")
+	}
+
+	return nil
+}
+
 // IsNetworkMAC validates an Ethernet MAC address. e.g. "00:00:5e:00:53:01".
 func IsNetworkMAC(value string) error {
 	_, err := net.ParseMAC(value)
@@ -281,7 +277,7 @@ func IsNetwork(value string) error {
 	return nil
 }
 
-// IsNetworkAddressCIDR validates an IP addresss string in CIDR format.
+// IsNetworkAddressCIDR validates an IP address string in CIDR format.
 func IsNetworkAddressCIDR(value string) error {
 	_, _, err := net.ParseCIDR(value)
 	if err != nil {
@@ -337,7 +333,7 @@ func IsNetworkV4(value string) error {
 	return nil
 }
 
-// IsNetworkAddressV4 validates an IPv4 addresss string.
+// IsNetworkAddressV4 validates an IPv4 address string.
 func IsNetworkAddressV4(value string) error {
 	ip := net.ParseIP(value)
 	if ip == nil || ip.To4() == nil {
@@ -347,7 +343,7 @@ func IsNetworkAddressV4(value string) error {
 	return nil
 }
 
-// IsNetworkAddressCIDRV4 validates an IPv4 addresss string in CIDR format.
+// IsNetworkAddressCIDRV4 validates an IPv4 address string in CIDR format.
 func IsNetworkAddressCIDRV4(value string) error {
 	ip, subnet, err := net.ParseCIDR(value)
 	if err != nil {
@@ -400,7 +396,7 @@ func IsNetworkV6(value string) error {
 	return nil
 }
 
-// IsNetworkAddressV6 validates an IPv6 addresss string.
+// IsNetworkAddressV6 validates an IPv6 address string.
 func IsNetworkAddressV6(value string) error {
 	ip := net.ParseIP(value)
 	if ip == nil || ip.To4() != nil {
@@ -410,7 +406,7 @@ func IsNetworkAddressV6(value string) error {
 	return nil
 }
 
-// IsNetworkAddressCIDRV6 validates an IPv6 addresss string in CIDR format.
+// IsNetworkAddressCIDRV6 validates an IPv6 address string in CIDR format.
 func IsNetworkAddressCIDRV6(value string) error {
 	ip, subnet, err := net.ParseCIDR(value)
 	if err != nil {
@@ -529,7 +525,8 @@ func IsURLSegmentSafe(value string) error {
 
 // IsUUID validates whether a value is a UUID.
 func IsUUID(value string) error {
-	if uuid.Parse(value) == nil {
+	_, err := uuid.Parse(value)
+	if err != nil {
 		return fmt.Errorf("Invalid UUID")
 	}
 
@@ -623,7 +620,7 @@ func IsListenAddress(allowDNS bool, allowWildcard bool, requirePort bool) func(v
 		}
 
 		// Validate wildcard.
-		if stringInSlice(host, []string{"", "::", "[::]", "0.0.0.0"}) {
+		if slices.Contains([]string{"", "::", "[::]", "0.0.0.0"}, host) {
 			if !allowWildcard {
 				return fmt.Errorf("Wildcard addresses aren't allowed")
 			}
@@ -648,18 +645,6 @@ func IsListenAddress(allowDNS bool, allowWildcard bool, requirePort bool) func(v
 
 		return nil
 	}
-}
-
-// IsX509Certificate checks if the value is a valid x509 PEM Certificate.
-func IsX509Certificate(value string) error {
-	certBlock, _ := pem.Decode([]byte(value))
-	if certBlock == nil {
-		return fmt.Errorf("Invalid certificate")
-	}
-
-	_, err := x509.ParseCertificate(certBlock.Bytes)
-
-	return err
 }
 
 // IsAbsFilePath checks if value is an absolute file path.
@@ -727,9 +712,9 @@ func IsHostname(name string) error {
 		return fmt.Errorf(`Name must not end with "-" character`)
 	}
 
-	_, err := strconv.Atoi(string(name[0]))
+	_, err := strconv.ParseUint(name, 10, 64)
 	if err == nil {
-		return fmt.Errorf("Name must not start with a number")
+		return fmt.Errorf("Name cannot be a number")
 	}
 
 	match, err := regexp.MatchString(`^[\-a-zA-Z0-9]+$`, name)
@@ -818,6 +803,17 @@ func IsValidCPUSet(value string) error {
 		return fmt.Errorf("Invalid CPU limit syntax")
 	}
 
+	// Validate single values.
+	cpu, err := strconv.ParseInt(value, 10, 64)
+	if err == nil {
+		if cpu < 1 {
+			return fmt.Errorf("Invalid cpuset value: %s", value)
+		}
+
+		return nil
+	}
+
+	// Handle complex values.
 	cpus := make(map[int64]int)
 	chunks := strings.Split(value, ",")
 

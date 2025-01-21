@@ -3,22 +3,10 @@ test_server_config() {
   spawn_incus "${INCUS_SERVERCONFIG_DIR}" true
   ensure_has_localhost_remote "${INCUS_ADDR}"
 
-  test_server_config_password
   test_server_config_access
   test_server_config_storage
 
   kill_incus "${INCUS_SERVERCONFIG_DIR}"
-}
-
-test_server_config_password() {
-  incus config set core.trust_password 123456
-
-  config=$(incus config show)
-  echo "${config}" | grep -q "trust_password"
-  echo "${config}" | grep -q -v "123456"
-
-  incus config unset core.trust_password
-  incus config show | grep -q -v "trust_password"
 }
 
 test_server_config_access() {
@@ -62,8 +50,8 @@ test_server_config_storage() {
   ! incus config set storage.backups_volume "${pool}/backups"
   ! incus config set storage.images_volume "${pool}/images"
 
-  incus storage volume snapshot delete "${pool}" backups/snap0
-  incus storage volume snapshot delete "${pool}" images/snap0
+  incus storage volume snapshot delete "${pool}" backups snap0
+  incus storage volume snapshot delete "${pool}" images snap0
 
   # Set the configuration
   incus config set storage.backups_volume "${pool}/backups"

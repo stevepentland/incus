@@ -24,9 +24,9 @@ const CertificateTypeUnknown = "unknown"
 type CertificatesPost struct {
 	CertificatePut `yaml:",inline"`
 
-	// Server trust password (used to add an untrusted client)
+	// Trust token (used to add an untrusted client)
 	// Example: blah
-	Password string `json:"password" yaml:"password"`
+	TrustToken string `json:"trust_token" yaml:"trust_token"`
 
 	// Whether to create a certificate add token
 	// Example: true
@@ -61,11 +61,17 @@ type CertificatePut struct {
 	// API extension: certificate_project
 	Projects []string `json:"projects" yaml:"projects"`
 
-	// The certificate itself, as PEM encoded X509
+	// The certificate itself, as PEM encoded X509 (or as base64 encoded X509 on POST)
 	// Example: X509 PEM certificate
 	//
 	// API extension: certificate_self_renewal
 	Certificate string `json:"certificate" yaml:"certificate"`
+
+	// Certificate description
+	// Example: X509 certificate
+	//
+	// API extension: certificate_description
+	Description string `json:"description" yaml:"description"`
 }
 
 // Certificate represents a certificate
@@ -81,8 +87,8 @@ type Certificate struct {
 }
 
 // Writable converts a full Certificate struct into a CertificatePut struct (filters read-only fields).
-func (cert *Certificate) Writable() CertificatePut {
-	return cert.CertificatePut
+func (c *Certificate) Writable() CertificatePut {
+	return c.CertificatePut
 }
 
 // URL returns the URL for the certificate.

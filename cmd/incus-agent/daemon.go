@@ -3,8 +3,7 @@ package main
 import (
 	"sync"
 
-	"github.com/lxc/incus/incusd/events"
-	"github.com/lxc/incus/incusd/vsock"
+	"github.com/lxc/incus/v6/internal/server/events"
 )
 
 // A Daemon can respond to requests from a shared client.
@@ -16,8 +15,6 @@ type Daemon struct {
 	serverCID         uint32
 	serverPort        uint32
 	serverCertificate string
-
-	localCID uint32
 
 	// The channel which is used to indicate that the agent was able to connect to the host.
 	chConnected chan struct{}
@@ -31,11 +28,8 @@ type Daemon struct {
 func newDaemon(debug, verbose bool) *Daemon {
 	hostEvents := events.NewServer(debug, verbose, nil)
 
-	cid, _ := vsock.ContextID()
-
 	return &Daemon{
 		events:      hostEvents,
 		chConnected: make(chan struct{}),
-		localCID:    cid,
 	}
 }

@@ -70,6 +70,11 @@ type StorageVolumePost struct {
 	//
 	// API extension: storage_volume_project_move
 	Project string `json:"project,omitempty" yaml:"project,omitempty"`
+
+	// Migration source
+	//
+	// API extension: cluster_internal_custom_volume_copy
+	Source StorageVolumeSource `json:"source" yaml:"source"`
 }
 
 // StorageVolumePostTarget represents the migration target host and operation
@@ -226,11 +231,23 @@ type StorageVolumeSource struct {
 	// API extension: custom_volume_refresh
 	Refresh bool `json:"refresh" yaml:"refresh"`
 
+	// Whether to exclude source snapshots earlier than latest target snapshot
+	// Example: false
+	//
+	// API extension: custom_volume_refresh_exclude_older_snapshots
+	RefreshExcludeOlder bool `json:"refresh_exclude_older" yaml:"refresh_exclude_older"`
+
 	// Source project name
 	// Example: foo
 	//
 	// API extension: storage_api_project
 	Project string `json:"project,omitempty" yaml:"project,omitempty"`
+
+	// What cluster member this record was found on
+	// Example: server01
+	//
+	// API extension: cluster_internal_custom_volume_copy
+	Location string `json:"location" yaml:"location"`
 }
 
 // Writable converts a full StorageVolume struct into a StorageVolumePut struct (filters read-only fields).

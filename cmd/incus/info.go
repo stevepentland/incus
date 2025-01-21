@@ -3,27 +3,30 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/client"
-	config "github.com/lxc/incus/internal/cliconfig"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/units"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/internal/instance"
+	"github.com/lxc/incus/v6/shared/api"
+	config "github.com/lxc/incus/v6/shared/cliconfig"
+	"github.com/lxc/incus/v6/shared/units"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 type cmdInfo struct {
 	global *cmdGlobal
 
-	flagShowLog   bool
-	flagResources bool
-	flagTarget    string
+	flagShowAccess bool
+	flagShowLog    bool
+	flagResources  bool
+	flagTarget     string
 }
 
 func (c *cmdInfo) Command() *cobra.Command {
@@ -40,9 +43,18 @@ incus info [<remote>:] [--resources]
     For server information.`))
 
 	cmd.RunE = c.Run
-	cmd.Flags().BoolVar(&c.flagShowLog, "show-log", false, i18n.G("Show the instance's last 100 log lines?"))
+	cmd.Flags().BoolVar(&c.flagShowAccess, "show-access", false, i18n.G("Show the instance's access list"))
+	cmd.Flags().BoolVar(&c.flagShowLog, "show-log", false, i18n.G("Show the instance's recent log entries"))
 	cmd.Flags().BoolVar(&c.flagResources, "resources", false, i18n.G("Show the resources available to the server"))
 	cmd.Flags().StringVar(&c.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -77,6 +89,22 @@ func (c *cmdInfo) Run(cmd *cobra.Command, args []string) error {
 
 	if cName == "" {
 		return c.remoteInfo(d)
+	}
+
+	if c.flagShowAccess {
+		access, err := d.GetInstanceAccess(cName)
+		if err != nil {
+			return err
+		}
+
+		data, err := yaml.Marshal(access)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("%s", data)
+
+		return nil
 	}
 
 	return c.instanceInfo(d, conf.Remotes[remote], cName, c.flagShowLog)
@@ -329,6 +357,29 @@ func (c *cmdInfo) renderCPU(cpu api.ResourcesCPUSocket, prefix string) {
 	}
 }
 
+func (c *cmdInfo) renderUSB(usb api.ResourcesUSBDevice, prefix string) {
+	fmt.Printf(prefix+i18n.G("Vendor: %v")+"\n", usb.Vendor)
+	fmt.Printf(prefix+i18n.G("Vendor ID: %v")+"\n", usb.VendorID)
+	fmt.Printf(prefix+i18n.G("Product: %v")+"\n", usb.Product)
+	fmt.Printf(prefix+i18n.G("Product ID: %v")+"\n", usb.ProductID)
+	fmt.Printf(prefix+i18n.G("Bus Address: %v")+"\n", usb.BusAddress)
+	fmt.Printf(prefix+i18n.G("Device Address: %v")+"\n", usb.DeviceAddress)
+	if len(usb.Serial) > 0 {
+		fmt.Printf(prefix+i18n.G("Serial Number: %v")+"\n", usb.Serial)
+	}
+}
+
+func (c *cmdInfo) renderPCI(pci api.ResourcesPCIDevice, prefix string) {
+	fmt.Printf(prefix+i18n.G("Address: %v")+"\n", pci.PCIAddress)
+	fmt.Printf(prefix+i18n.G("Vendor: %v")+"\n", pci.Vendor)
+	fmt.Printf(prefix+i18n.G("Vendor ID: %v")+"\n", pci.VendorID)
+	fmt.Printf(prefix+i18n.G("Product: %v")+"\n", pci.Product)
+	fmt.Printf(prefix+i18n.G("Product ID: %v")+"\n", pci.ProductID)
+	fmt.Printf(prefix+i18n.G("NUMA node: %v")+"\n", pci.NUMANode)
+	fmt.Printf(prefix+i18n.G("IOMMU group: %v")+"\n", pci.IOMMUGroup)
+	fmt.Printf(prefix+i18n.G("Driver: %v")+"\n", pci.Driver)
+}
+
 func (c *cmdInfo) remoteInfo(d incus.InstanceServer) error {
 	// Targeting
 	if c.flagTarget != "" {
@@ -349,12 +400,111 @@ func (c *cmdInfo) remoteInfo(d incus.InstanceServer) error {
 			return err
 		}
 
+		// System
+		fmt.Printf(i18n.G("System:") + "\n")
+		if resources.System.UUID != "" {
+			fmt.Printf("  "+i18n.G("UUID: %v")+"\n", resources.System.UUID)
+		}
+
+		if resources.System.Vendor != "" {
+			fmt.Printf("  "+i18n.G("Vendor: %v")+"\n", resources.System.Vendor)
+		}
+
+		if resources.System.Product != "" {
+			fmt.Printf("  "+i18n.G("Product: %v")+"\n", resources.System.Product)
+		}
+
+		if resources.System.Family != "" {
+			fmt.Printf("  "+i18n.G("Family: %v")+"\n", resources.System.Family)
+		}
+
+		if resources.System.Version != "" {
+			fmt.Printf("  "+i18n.G("Version: %v")+"\n", resources.System.Version)
+		}
+
+		if resources.System.Sku != "" {
+			fmt.Printf("  "+i18n.G("SKU: %v")+"\n", resources.System.Sku)
+		}
+
+		if resources.System.Serial != "" {
+			fmt.Printf("  "+i18n.G("Serial: %v")+"\n", resources.System.Serial)
+		}
+
+		if resources.System.Type != "" {
+			fmt.Printf("  "+i18n.G("Type: %s")+"\n", resources.System.Type)
+		}
+
+		// System: Chassis
+		if resources.System.Chassis != nil {
+			fmt.Printf(i18n.G("  Chassis:") + "\n")
+			if resources.System.Chassis.Vendor != "" {
+				fmt.Printf("      "+i18n.G("Vendor: %s")+"\n", resources.System.Chassis.Vendor)
+			}
+
+			if resources.System.Chassis.Type != "" {
+				fmt.Printf("      "+i18n.G("Type: %s")+"\n", resources.System.Chassis.Type)
+			}
+
+			if resources.System.Chassis.Version != "" {
+				fmt.Printf("      "+i18n.G("Version: %s")+"\n", resources.System.Chassis.Version)
+			}
+
+			if resources.System.Chassis.Serial != "" {
+				fmt.Printf("      "+i18n.G("Serial: %s")+"\n", resources.System.Chassis.Serial)
+			}
+		}
+
+		// System: Motherboard
+		if resources.System.Motherboard != nil {
+			fmt.Printf(i18n.G("  Motherboard:") + "\n")
+			if resources.System.Motherboard.Vendor != "" {
+				fmt.Printf("      "+i18n.G("Vendor: %s")+"\n", resources.System.Motherboard.Vendor)
+			}
+
+			if resources.System.Motherboard.Product != "" {
+				fmt.Printf("      "+i18n.G("Product: %s")+"\n", resources.System.Motherboard.Product)
+			}
+
+			if resources.System.Motherboard.Serial != "" {
+				fmt.Printf("      "+i18n.G("Serial: %s")+"\n", resources.System.Motherboard.Serial)
+			}
+
+			if resources.System.Motherboard.Version != "" {
+				fmt.Printf("      "+i18n.G("Version: %s")+"\n", resources.System.Motherboard.Version)
+			}
+		}
+
+		// System: Firmware
+		if resources.System.Firmware != nil {
+			fmt.Printf(i18n.G("  Firmware:") + "\n")
+			if resources.System.Firmware.Vendor != "" {
+				fmt.Printf("      "+i18n.G("Vendor: %s")+"\n", resources.System.Firmware.Vendor)
+			}
+
+			if resources.System.Firmware.Version != "" {
+				fmt.Printf("      "+i18n.G("Version: %s")+"\n", resources.System.Firmware.Version)
+			}
+
+			if resources.System.Firmware.Date != "" {
+				fmt.Printf("      "+i18n.G("Date: %s")+"\n", resources.System.Firmware.Date)
+			}
+		}
+
+		// Load
+		fmt.Printf("\n" + i18n.G("Load:") + "\n")
+		if resources.Load.Processes > 0 {
+			fmt.Printf("  "+i18n.G("Processes: %d")+"\n", resources.Load.Processes)
+			fmt.Printf("  "+i18n.G("Average: %.2f %.2f %.2f")+"\n", resources.Load.Average1Min, resources.Load.Average5Min, resources.Load.Average10Min)
+		}
+
 		// CPU
 		if len(resources.CPU.Sockets) == 1 {
-			fmt.Printf(i18n.G("CPU (%s):")+"\n", resources.CPU.Architecture)
+			fmt.Printf("\n" + i18n.G("CPU:") + "\n")
+			fmt.Printf("  "+i18n.G("Architecture: %s")+"\n", resources.CPU.Architecture)
 			c.renderCPU(resources.CPU.Sockets[0], "  ")
 		} else if len(resources.CPU.Sockets) > 1 {
-			fmt.Printf(i18n.G("CPUs (%s):")+"\n", resources.CPU.Architecture)
+			fmt.Printf(i18n.G("CPUs:") + "\n")
+			fmt.Printf("  "+i18n.G("Architecture: %s")+"\n", resources.CPU.Architecture)
 			for _, cpu := range resources.CPU.Sockets {
 				fmt.Printf("  "+i18n.G("Socket %d:")+"\n", cpu.Socket)
 				c.renderCPU(cpu, "    ")
@@ -427,6 +577,30 @@ func (c *cmdInfo) remoteInfo(d incus.InstanceServer) error {
 			}
 		}
 
+		// USB
+		if len(resources.USB.Devices) == 1 {
+			fmt.Printf("\n" + i18n.G("USB device:") + "\n")
+			c.renderUSB(resources.USB.Devices[0], "  ")
+		} else if len(resources.USB.Devices) > 1 {
+			fmt.Printf("\n" + i18n.G("USB devices:") + "\n")
+			for id, usb := range resources.USB.Devices {
+				fmt.Printf("  "+i18n.G("Device %d:")+"\n", id)
+				c.renderUSB(usb, "    ")
+			}
+		}
+
+		// PCI
+		if len(resources.PCI.Devices) == 1 {
+			fmt.Printf("\n" + i18n.G("PCI device:") + "\n")
+			c.renderPCI(resources.PCI.Devices[0], "  ")
+		} else if len(resources.PCI.Devices) > 1 {
+			fmt.Printf("\n" + i18n.G("PCI devices:") + "\n")
+			for id, pci := range resources.PCI.Devices {
+				fmt.Printf("  "+i18n.G("Device %d:")+"\n", id)
+				c.renderPCI(pci, "    ")
+			}
+		}
+
 		return nil
 	}
 
@@ -457,21 +631,24 @@ func (c *cmdInfo) instanceInfo(d incus.InstanceServer, remote config.Remote, nam
 		return err
 	}
 
-	const layout = "2006/01/02 15:04 MST"
-
 	fmt.Printf(i18n.G("Name: %s")+"\n", inst.Name)
-
+	fmt.Printf(i18n.G("Description: %s")+"\n", inst.Description)
 	fmt.Printf(i18n.G("Status: %s")+"\n", strings.ToUpper(inst.Status))
 
-	if inst.Type == "" {
-		inst.Type = "container"
+	instType := inst.Type
+	if instType == "" {
+		instType = "container"
+	}
+
+	if util.IsTrue(inst.ExpandedConfig["volatile.container.oci"]) {
+		instType = fmt.Sprintf("%s (%s)", instType, i18n.G("application"))
 	}
 
 	if inst.Ephemeral {
-		fmt.Printf(i18n.G("Type: %s (ephemeral)")+"\n", inst.Type)
-	} else {
-		fmt.Printf(i18n.G("Type: %s")+"\n", inst.Type)
+		instType = fmt.Sprintf("%s (%s)", instType, i18n.G("ephemeral"))
 	}
+
+	fmt.Printf(i18n.G("Type: %s")+"\n", instType)
 
 	fmt.Printf(i18n.G("Architecture: %s")+"\n", inst.Architecture)
 
@@ -483,15 +660,30 @@ func (c *cmdInfo) instanceInfo(d incus.InstanceServer, remote config.Remote, nam
 		fmt.Printf(i18n.G("PID: %d")+"\n", inst.State.Pid)
 	}
 
-	if shared.TimeIsSet(inst.CreatedAt) {
-		fmt.Printf(i18n.G("Created: %s")+"\n", inst.CreatedAt.Local().Format(layout))
+	if !inst.CreatedAt.IsZero() {
+		fmt.Printf(i18n.G("Created: %s")+"\n", inst.CreatedAt.Local().Format(dateLayout))
 	}
 
-	if shared.TimeIsSet(inst.LastUsedAt) {
-		fmt.Printf(i18n.G("Last Used: %s")+"\n", inst.LastUsedAt.Local().Format(layout))
+	if !inst.LastUsedAt.IsZero() {
+		fmt.Printf(i18n.G("Last Used: %s")+"\n", inst.LastUsedAt.Local().Format(dateLayout))
 	}
 
 	if inst.State.Pid != 0 {
+		if !inst.State.StartedAt.IsZero() {
+			fmt.Printf(i18n.G("Started: %s")+"\n", inst.State.StartedAt.Local().Format(dateLayout))
+		}
+
+		// Operating System info
+		if inst.State.OSInfo != nil {
+			fmt.Println("\n" + i18n.G("Operating System:"))
+			osInfo := fmt.Sprintf("  %s: %s\n", i18n.G("OS"), inst.State.OSInfo.OS)
+			osInfo += fmt.Sprintf("  %s: %s\n", i18n.G("OS Version"), inst.State.OSInfo.OSVersion)
+			osInfo += fmt.Sprintf("  %s: %s\n", i18n.G("Kernel Version"), inst.State.OSInfo.KernelVersion)
+			osInfo += fmt.Sprintf("  %s: %s\n", i18n.G("Hostname"), inst.State.OSInfo.Hostname)
+			osInfo += fmt.Sprintf("  %s: %s\n", i18n.G("FQDN"), inst.State.OSInfo.FQDN)
+			fmt.Print(osInfo)
+		}
+
 		fmt.Println("\n" + i18n.G("Resources:"))
 		// Processes
 		fmt.Printf("  "+i18n.G("Processes: %d")+"\n", inst.State.Processes)
@@ -548,30 +740,39 @@ func (c *cmdInfo) instanceInfo(d incus.InstanceServer, remote config.Remote, nam
 		// Network usage and IP info
 		networkInfo := ""
 		if inst.State.Network != nil {
-			for netName, net := range inst.State.Network {
+			network := inst.State.Network
+
+			netNames := make([]string, 0, len(network))
+			for netName := range network {
+				netNames = append(netNames, netName)
+			}
+
+			sort.Strings(netNames)
+
+			for _, netName := range netNames {
 				networkInfo += fmt.Sprintf("    %s:\n", netName)
-				networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("Type"), net.Type)
-				networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("State"), strings.ToUpper(net.State))
-				if net.HostName != "" {
-					networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("Host interface"), net.HostName)
+				networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("Type"), network[netName].Type)
+				networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("State"), strings.ToUpper(network[netName].State))
+				if network[netName].HostName != "" {
+					networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("Host interface"), network[netName].HostName)
 				}
 
-				if net.Hwaddr != "" {
-					networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("MAC address"), net.Hwaddr)
+				if network[netName].Hwaddr != "" {
+					networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("MAC address"), network[netName].Hwaddr)
 				}
 
-				if net.Mtu != 0 {
-					networkInfo += fmt.Sprintf("      %s: %d\n", i18n.G("MTU"), net.Mtu)
+				if network[netName].Mtu != 0 {
+					networkInfo += fmt.Sprintf("      %s: %d\n", i18n.G("MTU"), network[netName].Mtu)
 				}
 
-				networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("Bytes received"), units.GetByteSizeString(net.Counters.BytesReceived, 2))
-				networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("Bytes sent"), units.GetByteSizeString(net.Counters.BytesSent, 2))
-				networkInfo += fmt.Sprintf("      %s: %d\n", i18n.G("Packets received"), net.Counters.PacketsReceived)
-				networkInfo += fmt.Sprintf("      %s: %d\n", i18n.G("Packets sent"), net.Counters.PacketsSent)
+				networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("Bytes received"), units.GetByteSizeString(network[netName].Counters.BytesReceived, 2))
+				networkInfo += fmt.Sprintf("      %s: %s\n", i18n.G("Bytes sent"), units.GetByteSizeString(network[netName].Counters.BytesSent, 2))
+				networkInfo += fmt.Sprintf("      %s: %d\n", i18n.G("Packets received"), network[netName].Counters.PacketsReceived)
+				networkInfo += fmt.Sprintf("      %s: %d\n", i18n.G("Packets sent"), network[netName].Counters.PacketsSent)
 
 				networkInfo += fmt.Sprintf("      %s:\n", i18n.G("IP addresses"))
 
-				for _, addr := range net.Addresses {
+				for _, addr := range network[netName].Addresses {
 					if addr.Family == "inet" {
 						networkInfo += fmt.Sprintf("        %s:  %s/%s (%s)\n", addr.Family, addr.Address, addr.Netmask, addr.Scope)
 					} else {
@@ -599,17 +800,17 @@ func (c *cmdInfo) instanceInfo(d incus.InstanceServer, remote config.Remote, nam
 
 			var row []string
 
-			fields := strings.Split(snap.Name, shared.SnapshotDelimiter)
+			fields := strings.Split(snap.Name, instance.SnapshotDelimiter)
 			row = append(row, fields[len(fields)-1])
 
-			if shared.TimeIsSet(snap.CreatedAt) {
-				row = append(row, snap.CreatedAt.Local().Format(layout))
+			if !snap.CreatedAt.IsZero() {
+				row = append(row, snap.CreatedAt.Local().Format(dateLayout))
 			} else {
 				row = append(row, " ")
 			}
 
-			if shared.TimeIsSet(snap.ExpiresAt) {
-				row = append(row, snap.ExpiresAt.Local().Format(layout))
+			if !snap.ExpiresAt.IsZero() {
+				row = append(row, snap.ExpiresAt.Local().Format(dateLayout))
 			} else {
 				row = append(row, " ")
 			}
@@ -631,7 +832,7 @@ func (c *cmdInfo) instanceInfo(d incus.InstanceServer, remote config.Remote, nam
 			i18n.G("Stateful"),
 		}
 
-		_ = cli.RenderTable(cli.TableFormatTable, snapHeader, snapData, inst.Snapshots)
+		_ = cli.RenderTable(os.Stdout, cli.TableFormatTable, snapHeader, snapData, inst.Snapshots)
 	}
 
 	// List backups
@@ -647,14 +848,14 @@ func (c *cmdInfo) instanceInfo(d incus.InstanceServer, remote config.Remote, nam
 			var row []string
 			row = append(row, backup.Name)
 
-			if shared.TimeIsSet(backup.CreatedAt) {
-				row = append(row, backup.CreatedAt.Local().Format(layout))
+			if !backup.CreatedAt.IsZero() {
+				row = append(row, backup.CreatedAt.Local().Format(dateLayout))
 			} else {
 				row = append(row, " ")
 			}
 
-			if shared.TimeIsSet(backup.ExpiresAt) {
-				row = append(row, backup.ExpiresAt.Local().Format(layout))
+			if !backup.ExpiresAt.IsZero() {
+				row = append(row, backup.ExpiresAt.Local().Format(dateLayout))
 			} else {
 				row = append(row, " ")
 			}
@@ -683,7 +884,7 @@ func (c *cmdInfo) instanceInfo(d incus.InstanceServer, remote config.Remote, nam
 			i18n.G("Optimized Storage"),
 		}
 
-		_ = cli.RenderTable(cli.TableFormatTable, backupHeader, backupData, inst.Backups)
+		_ = cli.RenderTable(os.Stdout, cli.TableFormatTable, backupHeader, backupData, inst.Backups)
 	}
 
 	if showLog {

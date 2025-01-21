@@ -10,18 +10,19 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gorilla/websocket"
 	"github.com/pkg/sftp"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	"github.com/lxc/incus/shared/cancel"
-	"github.com/lxc/incus/shared/ioprogress"
-	"github.com/lxc/incus/shared/tcp"
-	"github.com/lxc/incus/shared/units"
-	"github.com/lxc/incus/shared/ws"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/cancel"
+	"github.com/lxc/incus/v6/shared/ioprogress"
+	"github.com/lxc/incus/v6/shared/tcp"
+	localtls "github.com/lxc/incus/v6/shared/tls"
+	"github.com/lxc/incus/v6/shared/units"
+	"github.com/lxc/incus/v6/shared/ws"
 )
 
 // Instance handling functions.
@@ -208,7 +209,7 @@ func (r *ProtocolIncus) rebuildInstance(instanceName string, instance api.Instan
 	}
 
 	// Send the request
-	op, _, err := r.queryOperation("POST", fmt.Sprintf("%s/%s/rebuild?project=%s", path, url.PathEscape(instanceName), r.project), instance, "")
+	op, _, err := r.queryOperation("POST", fmt.Sprintf("%s/%s/rebuild", path, url.PathEscape(instanceName)), instance, "")
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +258,7 @@ func (r *ProtocolIncus) tryRebuildInstance(instanceName string, req api.Instance
 			err = rop.targetOp.Wait()
 			if err != nil {
 				errors = append(errors, remoteOperationResult{URL: serverURL, Error: err})
-				if shared.IsConnectionError(err) {
+				if localtls.IsConnectionError(err) {
 					continue
 				}
 
@@ -283,6 +284,11 @@ func (r *ProtocolIncus) tryRebuildInstance(instanceName string, req api.Instance
 
 // RebuildInstanceFromImage rebuilds an instance from an image.
 func (r *ProtocolIncus) RebuildInstanceFromImage(source ImageServer, image api.Image, instanceName string, req api.InstanceRebuildPost) (RemoteOperation, error) {
+	err := r.CheckExtension("instances_rebuild")
+	if err != nil {
+		return nil, err
+	}
+
 	info, err := r.getSourceImageConnectionInfo(source, image, &req.Source)
 	if err != nil {
 		return nil, err
@@ -313,6 +319,11 @@ func (r *ProtocolIncus) RebuildInstanceFromImage(source ImageServer, image api.I
 
 // RebuildInstance rebuilds an instance as empty.
 func (r *ProtocolIncus) RebuildInstance(instanceName string, instance api.InstanceRebuildPost) (op Operation, err error) {
+	err = r.CheckExtension("instances_rebuild")
+	if err != nil {
+		return nil, err
+	}
+
 	return r.rebuildInstance(instanceName, instance)
 }
 
@@ -615,6 +626,9 @@ func (r *ProtocolIncus) tryCreateInstance(req api.InstancesPost, urls []string, 
 	operation := req.Source.Operation
 
 	// Forward targetOp to remote op
+	chConnect := make(chan error, 1)
+	chWait := make(chan error, 1)
+
 	go func() {
 		success := false
 		var errors []remoteOperationResult
@@ -643,7 +657,7 @@ func (r *ProtocolIncus) tryCreateInstance(req api.InstancesPost, urls []string, 
 			if err != nil {
 				errors = append(errors, remoteOperationResult{URL: serverURL, Error: err})
 
-				if shared.IsConnectionError(err) {
+				if localtls.IsConnectionError(err) {
 					continue
 				}
 
@@ -654,13 +668,35 @@ func (r *ProtocolIncus) tryCreateInstance(req api.InstancesPost, urls []string, 
 			break
 		}
 
-		if !success {
-			rop.err = remoteOperationError("Failed instance creation", errors)
+		if success {
+			chConnect <- nil
+			close(chConnect)
+		} else {
+			chConnect <- remoteOperationError("Failed instance creation", errors)
+			close(chConnect)
+
 			if op != nil {
 				_ = op.Cancel()
 			}
 		}
+	}()
 
+	if op != nil {
+		go func() {
+			chWait <- op.Wait()
+			close(chWait)
+		}()
+	}
+
+	go func() {
+		var err error
+
+		select {
+		case err = <-chConnect:
+		case err = <-chWait:
+		}
+
+		rop.err = err
 		close(rop.chDone)
 	}()
 
@@ -722,7 +758,7 @@ func (r *ProtocolIncus) CopyInstance(source InstanceServer, instance api.Instanc
 			}
 		}
 
-		if shared.StringInSlice(args.Mode, []string{"push", "relay"}) {
+		if slices.Contains([]string{"push", "relay"}, args.Mode) {
 			if !r.HasExtension("container_push") {
 				return nil, fmt.Errorf("The target server is missing the required \"container_push\" API extension")
 			}
@@ -746,6 +782,10 @@ func (r *ProtocolIncus) CopyInstance(source InstanceServer, instance api.Instanc
 			}
 		}
 
+		if args.RefreshExcludeOlder && !source.HasExtension("custom_volume_refresh_exclude_older_snapshots") {
+			return nil, fmt.Errorf("The source server is missing the required \"custom_volume_refresh_exclude_older_snapshots\" API extension")
+		}
+
 		if args.AllowInconsistent {
 			if !r.HasExtension("instance_allow_inconsistent_copy") {
 				return nil, fmt.Errorf("The source server is missing the required \"instance_allow_inconsistent_copy\" API extension")
@@ -760,6 +800,7 @@ func (r *ProtocolIncus) CopyInstance(source InstanceServer, instance api.Instanc
 		req.Source.Live = args.Live
 		req.Source.InstanceOnly = args.InstanceOnly
 		req.Source.Refresh = args.Refresh
+		req.Source.RefreshExcludeOlder = args.RefreshExcludeOlder
 		req.Source.AllowInconsistent = args.AllowInconsistent
 	}
 
@@ -832,6 +873,7 @@ func (r *ProtocolIncus) CopyInstance(source InstanceServer, instance api.Instanc
 		req.Source.Type = "migration"
 		req.Source.Mode = "push"
 		req.Source.Refresh = args.Refresh
+		req.Source.RefreshExcludeOlder = args.RefreshExcludeOlder
 
 		op, err := r.CreateInstance(req)
 		if err != nil {
@@ -852,7 +894,7 @@ func (r *ProtocolIncus) CopyInstance(source InstanceServer, instance api.Instanc
 		target.Certificate = info.Certificate
 		sourceReq.Target = &target
 
-		return r.tryMigrateInstance(source, instance.Name, sourceReq, info.Addresses)
+		return r.tryMigrateInstance(source, instance.Name, sourceReq, info.Addresses, op)
 	}
 
 	// Get source server connection information
@@ -963,7 +1005,7 @@ func (r *ProtocolIncus) RenameInstance(name string, instance api.InstancePost) (
 
 // tryMigrateInstance attempts to migrate a specific instance from a source server to one of the target URLs.
 // The function runs the migration operation asynchronously and returns a RemoteOperation to track the progress and handle any errors.
-func (r *ProtocolIncus) tryMigrateInstance(source InstanceServer, name string, req api.InstancePost, urls []string) (RemoteOperation, error) {
+func (r *ProtocolIncus) tryMigrateInstance(source InstanceServer, name string, req api.InstancePost, urls []string, op Operation) (RemoteOperation, error) {
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("The target server isn't listening on the network")
 	}
@@ -975,6 +1017,9 @@ func (r *ProtocolIncus) tryMigrateInstance(source InstanceServer, name string, r
 	operation := req.Target.Operation
 
 	// Forward targetOp to remote op
+	chConnect := make(chan error, 1)
+	chWait := make(chan error, 1)
+
 	go func() {
 		success := false
 		var errors []remoteOperationResult
@@ -997,7 +1042,7 @@ func (r *ProtocolIncus) tryMigrateInstance(source InstanceServer, name string, r
 			if err != nil {
 				errors = append(errors, remoteOperationResult{URL: serverURL, Error: err})
 
-				if shared.IsConnectionError(err) {
+				if localtls.IsConnectionError(err) {
 					continue
 				}
 
@@ -1008,10 +1053,35 @@ func (r *ProtocolIncus) tryMigrateInstance(source InstanceServer, name string, r
 			break
 		}
 
-		if !success {
-			rop.err = remoteOperationError("Failed instance migration", errors)
+		if success {
+			chConnect <- nil
+			close(chConnect)
+		} else {
+			chConnect <- remoteOperationError("Failed instance migration", errors)
+			close(chConnect)
+
+			if op != nil {
+				_ = op.Cancel()
+			}
+		}
+	}()
+
+	if op != nil {
+		go func() {
+			chWait <- op.Wait()
+			close(chWait)
+		}()
+	}
+
+	go func() {
+		var err error
+
+		select {
+		case err = <-chConnect:
+		case err = <-chWait:
 		}
 
+		rop.err = err
 		close(rop.chDone)
 	}()
 
@@ -1075,6 +1145,11 @@ func (r *ProtocolIncus) DeleteInstance(name string) (Operation, error) {
 
 // ExecInstance requests that Incus spawns a command inside the instance.
 func (r *ProtocolIncus) ExecInstance(instanceName string, exec api.InstanceExecPost, args *InstanceExecArgs) (Operation, error) {
+	// Ensure args are equivalent to empty InstanceExecArgs.
+	if args == nil {
+		args = &InstanceExecArgs{}
+	}
+
 	if exec.RecordOutput {
 		if !r.HasExtension("container_exec_recording") {
 			return nil, fmt.Errorf("The server is missing the required \"container_exec_recording\" API extension")
@@ -1109,179 +1184,204 @@ func (r *ProtocolIncus) ExecInstance(instanceName string, exec api.InstanceExecP
 	opAPI := op.Get()
 
 	// Process additional arguments
-	if args != nil {
-		// Parse the fds
-		fds := map[string]string{}
 
-		value, ok := opAPI.Metadata["fds"]
+	// Parse the fds
+	fds := map[string]string{}
+
+	value, ok := opAPI.Metadata["fds"]
+	if ok {
+		values := value.(map[string]any)
+		for k, v := range values {
+			fds[k] = v.(string)
+		}
+	}
+
+	if exec.RecordOutput && (args.Stdout != nil || args.Stderr != nil) {
+		err = op.Wait()
+		if err != nil {
+			return nil, err
+		}
+
+		opAPI = op.Get()
+		outputFiles := map[string]string{}
+		outputs, ok := opAPI.Metadata["output"].(map[string]any)
 		if ok {
-			values := value.(map[string]any)
-			for k, v := range values {
-				fds[k] = v.(string)
+			for k, v := range outputs {
+				outputFiles[k] = v.(string)
 			}
 		}
 
-		if exec.RecordOutput && (args.Stdout != nil || args.Stderr != nil) {
-			err = op.Wait()
+		if outputFiles["1"] != "" {
+			reader, _ := r.getInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["1"]))
+			if args.Stdout != nil {
+				_, errCopy := io.Copy(args.Stdout, reader)
+				// Regardless of errCopy value, we want to delete the file after a copy operation
+				errDelete := r.deleteInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["1"]))
+				if errDelete != nil {
+					return nil, errDelete
+				}
+
+				if errCopy != nil {
+					return nil, fmt.Errorf("Could not copy the content of the exec output log file to stdout: %w", err)
+				}
+			}
+
+			err = r.deleteInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["1"]))
 			if err != nil {
 				return nil, err
-			}
-
-			opAPI = op.Get()
-			outputFiles := map[string]string{}
-			outputs, ok := opAPI.Metadata["output"].(map[string]any)
-			if ok {
-				for k, v := range outputs {
-					outputFiles[k] = v.(string)
-				}
-			}
-
-			if outputFiles["1"] != "" {
-				reader, _ := r.getInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["1"]))
-				if args.Stdout != nil {
-					_, errCopy := io.Copy(args.Stdout, reader)
-					// Regardless of errCopy value, we want to delete the file after a copy operation
-					errDelete := r.deleteInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["1"]))
-					if errDelete != nil {
-						return nil, errDelete
-					}
-
-					if errCopy != nil {
-						return nil, fmt.Errorf("Could not copy the content of the exec output log file to stdout: %w", err)
-					}
-				}
-
-				err = r.deleteInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["1"]))
-				if err != nil {
-					return nil, err
-				}
-			}
-
-			if outputFiles["2"] != "" {
-				reader, _ := r.getInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["2"]))
-				if args.Stderr != nil {
-					_, errCopy := io.Copy(args.Stderr, reader)
-					errDelete := r.deleteInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["1"]))
-					if errDelete != nil {
-						return nil, errDelete
-					}
-
-					if errCopy != nil {
-						return nil, fmt.Errorf("Could not copy the content of the exec output log file to stderr: %w", err)
-					}
-				}
-
-				err = r.deleteInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["2"]))
-				if err != nil {
-					return nil, err
-				}
 			}
 		}
 
-		// Call the control handler with a connection to the control socket
-		if args.Control != nil && fds[api.SecretNameControl] != "" {
-			conn, err := r.GetOperationWebsocket(opAPI.ID, fds[api.SecretNameControl])
+		if outputFiles["2"] != "" {
+			reader, _ := r.getInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["2"]))
+			if args.Stderr != nil {
+				_, errCopy := io.Copy(args.Stderr, reader)
+				errDelete := r.deleteInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["1"]))
+				if errDelete != nil {
+					return nil, errDelete
+				}
+
+				if errCopy != nil {
+					return nil, fmt.Errorf("Could not copy the content of the exec output log file to stderr: %w", err)
+				}
+			}
+
+			err = r.deleteInstanceExecOutputLogFile(instanceName, filepath.Base(outputFiles["2"]))
 			if err != nil {
 				return nil, err
 			}
+		}
+	}
 
+	if fds[api.SecretNameControl] != "" {
+		conn, err := r.GetOperationWebsocket(opAPI.ID, fds[api.SecretNameControl])
+		if err != nil {
+			return nil, err
+		}
+
+		go func() {
+			_, _, _ = conn.ReadMessage() // Consume pings from server.
+		}()
+
+		if args.Control != nil {
+			// Call the control handler with a connection to the control socket
 			go args.Control(conn)
 		}
+	}
 
-		if exec.Interactive {
-			// Handle interactive sections
-			if args.Stdin != nil && args.Stdout != nil {
-				// Connect to the websocket
-				conn, err := r.GetOperationWebsocket(opAPI.ID, fds["0"])
-				if err != nil {
-					return nil, err
-				}
-
-				// And attach stdin and stdout to it
-				go func() {
-					ws.MirrorRead(context.Background(), conn, args.Stdin)
-					<-ws.MirrorWrite(context.Background(), conn, args.Stdout)
-					_ = conn.Close()
-
-					if args.DataDone != nil {
-						close(args.DataDone)
-					}
-				}()
-			} else {
-				if args.DataDone != nil {
-					close(args.DataDone)
-				}
-			}
-		} else {
-			// Handle non-interactive sessions
-			dones := make(map[int]chan struct{})
-			conns := []*websocket.Conn{}
-
-			// Handle stdin
-			if fds["0"] != "" {
-				conn, err := r.GetOperationWebsocket(opAPI.ID, fds["0"])
-				if err != nil {
-					return nil, err
-				}
-
-				conns = append(conns, conn)
-				dones[0] = ws.MirrorRead(context.Background(), conn, args.Stdin)
+	if exec.Interactive {
+		// Handle interactive sections
+		if args.Stdin != nil && args.Stdout != nil {
+			// Connect to the websocket
+			conn, err := r.GetOperationWebsocket(opAPI.ID, fds["0"])
+			if err != nil {
+				return nil, err
 			}
 
-			// Handle stdout
-			if fds["1"] != "" {
-				conn, err := r.GetOperationWebsocket(opAPI.ID, fds["1"])
-				if err != nil {
-					return nil, err
-				}
-
-				conns = append(conns, conn)
-				dones[1] = ws.MirrorWrite(context.Background(), conn, args.Stdout)
-			}
-
-			// Handle stderr
-			if fds["2"] != "" {
-				conn, err := r.GetOperationWebsocket(opAPI.ID, fds["2"])
-				if err != nil {
-					return nil, err
-				}
-
-				conns = append(conns, conn)
-				dones[2] = ws.MirrorWrite(context.Background(), conn, args.Stderr)
-			}
-
-			// Wait for everything to be done
+			// And attach stdin and stdout to it
 			go func() {
-				for i, chDone := range dones {
-					// Skip stdin, dealing with it separately below
-					if i == 0 {
-						continue
-					}
-
-					<-chDone
-				}
-
-				if fds["0"] != "" {
-					if args.Stdin != nil {
-						_ = args.Stdin.Close()
-					}
-
-					// Empty the stdin channel but don't block on it as
-					// stdin may be stuck in Read()
-					go func() {
-						<-dones[0]
-					}()
-				}
-
-				for _, conn := range conns {
-					_ = conn.Close()
-				}
+				ws.MirrorRead(conn, args.Stdin)
+				<-ws.MirrorWrite(conn, args.Stdout)
+				_ = conn.Close()
 
 				if args.DataDone != nil {
 					close(args.DataDone)
 				}
 			}()
+		} else {
+			if args.DataDone != nil {
+				close(args.DataDone)
+			}
 		}
+	} else {
+		// Handle non-interactive sessions
+		dones := make(map[int]chan error)
+		conns := []*websocket.Conn{}
+
+		// Handle stdin
+		if fds["0"] != "" {
+			conn, err := r.GetOperationWebsocket(opAPI.ID, fds["0"])
+			if err != nil {
+				return nil, err
+			}
+
+			go func() {
+				_, _, _ = conn.ReadMessage() // Consume pings from server.
+			}()
+
+			conns = append(conns, conn)
+			dones[0] = ws.MirrorRead(conn, args.Stdin)
+		}
+
+		waitConns := 0 // Used for keeping track of when stdout and stderr have finished.
+
+		// Handle stdout
+		if fds["1"] != "" {
+			conn, err := r.GetOperationWebsocket(opAPI.ID, fds["1"])
+			if err != nil {
+				return nil, err
+			}
+
+			// Discard Stdout from remote command if output writer not supplied.
+			if args.Stdout == nil {
+				args.Stdout = io.Discard
+			}
+
+			conns = append(conns, conn)
+			dones[1] = ws.MirrorWrite(conn, args.Stdout)
+			waitConns++
+		}
+
+		// Handle stderr
+		if fds["2"] != "" {
+			conn, err := r.GetOperationWebsocket(opAPI.ID, fds["2"])
+			if err != nil {
+				return nil, err
+			}
+
+			// Discard Stderr from remote command if output writer not supplied.
+			if args.Stderr == nil {
+				args.Stderr = io.Discard
+			}
+
+			conns = append(conns, conn)
+			dones[2] = ws.MirrorWrite(conn, args.Stderr)
+			waitConns++
+		}
+
+		// Wait for everything to be done
+		go func() {
+			for {
+				select {
+				case <-dones[0]:
+					// Handle stdin finish, but don't wait for it if output channels
+					// have all finished.
+					dones[0] = nil
+					_ = conns[0].Close()
+				case <-dones[1]:
+					dones[1] = nil
+					_ = conns[1].Close()
+					waitConns--
+				case <-dones[2]:
+					dones[2] = nil
+					_ = conns[2].Close()
+					waitConns--
+				}
+
+				if waitConns <= 0 {
+					// Close stdin websocket if defined and not already closed.
+					if dones[0] != nil {
+						conns[0].Close()
+					}
+
+					break
+				}
+			}
+
+			if args.DataDone != nil {
+				close(args.DataDone)
+			}
+		}()
 	}
 
 	return op, nil
@@ -1292,8 +1392,23 @@ func (r *ProtocolIncus) GetInstanceFile(instanceName string, filePath string) (i
 	var err error
 	var requestURL string
 
+	urlEncode := func(path string, query map[string]string) (string, error) {
+		u, err := url.Parse(path)
+		if err != nil {
+			return "", err
+		}
+
+		params := url.Values{}
+		for key, value := range query {
+			params.Add(key, value)
+		}
+
+		u.RawQuery = params.Encode()
+		return u.String(), nil
+	}
+
 	if r.IsAgent() {
-		requestURL, err = shared.URLEncode(
+		requestURL, err = urlEncode(
 			fmt.Sprintf("%s/1.0/files", r.httpBaseURL.String()),
 			map[string]string{"path": filePath})
 	} else {
@@ -1305,7 +1420,7 @@ func (r *ProtocolIncus) GetInstanceFile(instanceName string, filePath string) (i
 		}
 
 		// Prepare the HTTP request
-		requestURL, err = shared.URLEncode(
+		requestURL, err = urlEncode(
 			fmt.Sprintf("%s/1.0%s/%s/files", r.httpBaseURL.String(), path, url.PathEscape(instanceName)),
 			map[string]string{"path": filePath})
 	}
@@ -1339,7 +1454,7 @@ func (r *ProtocolIncus) GetInstanceFile(instanceName string, filePath string) (i
 	}
 
 	// Parse the headers
-	uid, gid, mode, fileType, _ := shared.ParseFileHeaders(resp.Header)
+	uid, gid, mode, fileType, _ := api.ParseFileHeaders(resp.Header)
 	fileResp := InstanceFileResponse{
 		UID:  uid,
 		GID:  gid,
@@ -1414,6 +1529,15 @@ func (r *ProtocolIncus) CreateInstanceFile(instanceName string, filePath string,
 	req, err := http.NewRequest("POST", requestURL, args.Content)
 	if err != nil {
 		return err
+	}
+
+	req.GetBody = func() (io.ReadCloser, error) {
+		_, err := args.Content.Seek(0, 0)
+		if err != nil {
+			return nil, err
+		}
+
+		return io.NopCloser(args.Content), nil
 	}
 
 	// Set the various headers
@@ -1572,7 +1696,7 @@ func (r *ProtocolIncus) GetInstanceFileSFTP(instanceName string) (*sftp.Client, 
 	}
 
 	// Get a SFTP client.
-	client, err := sftp.NewClientPipe(conn, conn)
+	client, err := sftp.NewClientPipe(conn, conn, sftp.MaxPacketUnchecked(128*1024))
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -1666,7 +1790,7 @@ func (r *ProtocolIncus) CreateInstanceSnapshot(instanceName string, snapshot api
 // CopyInstanceSnapshot copies a snapshot from a remote server into a new instance. Additional options can be passed using InstanceCopyArgs.
 func (r *ProtocolIncus) CopyInstanceSnapshot(source InstanceServer, instanceName string, snapshot api.InstanceSnapshot, args *InstanceSnapshotCopyArgs) (RemoteOperation, error) {
 	// Backward compatibility (with broken Name field)
-	fields := strings.Split(snapshot.Name, shared.SnapshotDelimiter)
+	fields := strings.Split(snapshot.Name, "/")
 	cName := instanceName
 	sName := fields[len(fields)-1]
 
@@ -1696,7 +1820,7 @@ func (r *ProtocolIncus) CopyInstanceSnapshot(source InstanceServer, instanceName
 	// Process the copy arguments
 	if args != nil {
 		// Quick checks.
-		if shared.StringInSlice(args.Mode, []string{"push", "relay"}) {
+		if slices.Contains([]string{"push", "relay"}, args.Mode) {
 			if !r.HasExtension("container_push") {
 				return nil, fmt.Errorf("The target server is missing the required \"container_push\" API extension")
 			}
@@ -1944,7 +2068,7 @@ func (r *ProtocolIncus) tryMigrateInstanceSnapshot(source InstanceServer, instan
 			if err != nil {
 				errors = append(errors, remoteOperationResult{URL: serverURL, Error: err})
 
-				if shared.IsConnectionError(err) {
+				if localtls.IsConnectionError(err) {
 					continue
 				}
 
@@ -2062,6 +2186,23 @@ func (r *ProtocolIncus) UpdateInstanceState(name string, state api.InstanceState
 	}
 
 	return op, nil
+}
+
+// GetInstanceAccess returns an Access entry for the provided instance name.
+func (r *ProtocolIncus) GetInstanceAccess(name string) (api.Access, error) {
+	access := api.Access{}
+
+	if !r.HasExtension("instance_access") {
+		return nil, fmt.Errorf("The server is missing the required \"instance_access\" API extension")
+	}
+
+	// Fetch the raw value
+	_, err := r.queryStruct("GET", fmt.Sprintf("/instances/%s/access", url.PathEscape(name)), nil, "", &access)
+	if err != nil {
+		return nil, err
+	}
+
+	return access, nil
 }
 
 // GetInstanceLogfiles returns a list of logfiles for the instance.
@@ -2330,6 +2471,15 @@ func (r *ProtocolIncus) CreateInstanceTemplateFile(instanceName string, template
 		return err
 	}
 
+	req.GetBody = func() (io.ReadCloser, error) {
+		_, err := content.Seek(0, 0)
+		if err != nil {
+			return nil, err
+		}
+
+		return io.NopCloser(content), nil
+	}
+
 	req.Header.Set("Content-Type", "application/octet-stream")
 
 	// Send the request
@@ -2376,6 +2526,10 @@ func (r *ProtocolIncus) ConsoleInstance(instanceName string, console api.Instanc
 
 	if console.Type == "vga" && !r.HasExtension("console_vga_type") {
 		return nil, fmt.Errorf("The server is missing the required \"console_vga_type\" API extension")
+	}
+
+	if console.Force && !r.HasExtension("console_force") {
+		return nil, fmt.Errorf(`The server is missing the required "console_force" API extension`)
 	}
 
 	// Send the request
@@ -2435,7 +2589,7 @@ func (r *ProtocolIncus) ConsoleInstance(instanceName string, console api.Instanc
 
 	// And attach stdin and stdout to it
 	go func() {
-		_, writeDone := ws.Mirror(context.Background(), conn, args.Terminal)
+		_, writeDone := ws.Mirror(conn, args.Terminal)
 		<-writeDone
 		_ = conn.Close()
 	}()
@@ -2464,6 +2618,10 @@ func (r *ProtocolIncus) ConsoleInstanceDynamic(instanceName string, console api.
 
 	if console.Type == "vga" && !r.HasExtension("console_vga_type") {
 		return nil, nil, fmt.Errorf("The server is missing the required \"console_vga_type\" API extension")
+	}
+
+	if console.Force && !r.HasExtension("console_force") {
+		return nil, nil, fmt.Errorf(`The server is missing the required "console_force" API extension`)
 	}
 
 	// Send the request.
@@ -2522,7 +2680,7 @@ func (r *ProtocolIncus) ConsoleInstanceDynamic(instanceName string, console api.
 		}
 
 		// Attach reader/writer.
-		_, writeDone := ws.Mirror(context.Background(), conn, rwc)
+		_, writeDone := ws.Mirror(conn, rwc)
 		<-writeDone
 		_ = conn.Close()
 

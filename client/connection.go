@@ -8,15 +8,17 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/zitadel/oidc/v2/pkg/oidc"
+	"github.com/zitadel/oidc/v3/pkg/oidc"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/logger"
-	"github.com/lxc/incus/shared/simplestreams"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/logger"
+	"github.com/lxc/incus/v6/shared/simplestreams"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 // ConnectionArgs represents a set of common connection properties.
@@ -146,7 +148,7 @@ func ConnectIncusHTTPWithContext(ctx context.Context, args *ConnectionArgs, clie
 //
 // If the path argument is empty, then $INCUS_SOCKET will be used, if
 // unset $INCUS_DIR/unix.socket will be used and if that one isn't set
-// either, then the path will default to /var/lib/incus/unix.socket.
+// either, then the path will default to /var/lib/incus/unix.socket or /run/incus/unix.socket.
 func ConnectIncusUnix(path string, args *ConnectionArgs) (InstanceServer, error) {
 	return ConnectIncusUnixWithContext(context.Background(), path, args)
 }
@@ -155,7 +157,7 @@ func ConnectIncusUnix(path string, args *ConnectionArgs) (InstanceServer, error)
 //
 // If the path argument is empty, then $INCUS_SOCKET will be used, if
 // unset $INCUS_DIR/unix.socket will be used and if that one isn't set
-// either, then the path will default to /var/lib/incus/unix.socket.
+// either, then the path will default to /var/lib/incus/unix.socket or /run/incus/unix.socket.
 func ConnectIncusUnixWithContext(ctx context.Context, path string, args *ConnectionArgs) (InstanceServer, error) {
 	logger.Debug("Connecting to a local Incus over a Unix socket")
 
@@ -171,6 +173,34 @@ func ConnectIncusUnixWithContext(ctx context.Context, path string, args *Connect
 
 	ctxConnected, ctxConnectedCancel := context.WithCancel(context.Background())
 
+	// Determine the socket path
+	var projectName string
+	if path == "" {
+		path = os.Getenv("INCUS_SOCKET")
+		if path == "" {
+			incusDir := os.Getenv("INCUS_DIR")
+			if incusDir == "" {
+				_, err := os.Lstat("/run/incus/unix.socket")
+				if err == nil {
+					incusDir = "/run/incus"
+				} else {
+					incusDir = "/var/lib/incus"
+				}
+			}
+
+			path = filepath.Join(incusDir, "unix.socket")
+			userPath := filepath.Join(incusDir, "unix.socket.user")
+			if !util.PathIsWritable(path) && util.PathIsWritable(userPath) {
+				// Handle the use of incus-user.
+				path = userPath
+
+				// When using incus-user, the project list is typically restricted.
+				// So let's try to be smart about the project we're using.
+				projectName = fmt.Sprintf("user-%d", os.Geteuid())
+			}
+		}
+	}
+
 	// Initialize the client struct
 	server := ProtocolIncus{
 		ctx:                ctx,
@@ -182,19 +212,7 @@ func ConnectIncusUnixWithContext(ctx context.Context, path string, args *Connect
 		ctxConnectedCancel: ctxConnectedCancel,
 		eventConns:         make(map[string]*websocket.Conn),
 		eventListeners:     make(map[string][]*EventListener),
-	}
-
-	// Determine the socket path
-	if path == "" {
-		path = os.Getenv("INCUS_SOCKET")
-		if path == "" {
-			incusDir := os.Getenv("INCUS_DIR")
-			if incusDir == "" {
-				incusDir = "/var/lib/incus"
-			}
-
-			path = filepath.Join(incusDir, "unix.socket")
-		}
+		project:            projectName,
 	}
 
 	// Setup the HTTP client
@@ -273,7 +291,7 @@ func ConnectSimpleStreams(url string, args *ConnectionArgs) (ImageServer, error)
 
 	// Setup the cache
 	if args.CachePath != "" {
-		if !shared.PathExists(args.CachePath) {
+		if !util.PathExists(args.CachePath) {
 			return nil, fmt.Errorf("Cache directory %q doesn't exist", args.CachePath)
 		}
 
@@ -285,7 +303,7 @@ func ConnectSimpleStreams(url string, args *ConnectionArgs) (ImageServer, error)
 			cacheExpiry = time.Hour
 		}
 
-		if !shared.PathExists(cachePath) {
+		if !util.PathExists(cachePath) {
 			err := os.Mkdir(cachePath, 0755)
 			if err != nil {
 				return nil, err
@@ -294,6 +312,40 @@ func ConnectSimpleStreams(url string, args *ConnectionArgs) (ImageServer, error)
 
 		ssClient.SetCache(cachePath, cacheExpiry)
 	}
+
+	return &server, nil
+}
+
+// ConnectOCI lets you connect to a remote OCI image registry over HTTPs.
+//
+// Unless the remote server is trusted by the system CA, the remote certificate must be provided (TLSServerCert).
+func ConnectOCI(uri string, args *ConnectionArgs) (ImageServer, error) {
+	logger.Debug("Connecting to a remote OCI server", logger.Ctx{"URL": uri})
+
+	// Cleanup URL
+	uri = strings.TrimSuffix(uri, "/")
+
+	// Use empty args if not specified
+	if args == nil {
+		args = &ConnectionArgs{}
+	}
+
+	// Initialize the client struct
+	server := ProtocolOCI{
+		httpHost:        uri,
+		httpUserAgent:   args.UserAgent,
+		httpCertificate: args.TLSServerCert,
+
+		cache: map[string]ociInfo{},
+	}
+
+	// Setup the HTTP client
+	httpClient, err := tlsHTTPClient(args.HTTPClient, args.TLSClientCert, args.TLSClientKey, args.TLSCA, args.TLSServerCert, args.InsecureSkipVerify, args.Proxy, args.TransportWrapper)
+	if err != nil {
+		return nil, err
+	}
+
+	server.http = httpClient
 
 	return &server, nil
 }
@@ -325,7 +377,7 @@ func httpsIncus(ctx context.Context, requestURL string, args *ConnectionArgs) (I
 		eventListeners:     make(map[string][]*EventListener),
 	}
 
-	if shared.StringInSlice(args.AuthType, []string{"oidc"}) {
+	if slices.Contains([]string{api.AuthenticationMethodOIDC}, args.AuthType) {
 		server.RequireAuthenticated(true)
 	}
 
@@ -340,7 +392,7 @@ func httpsIncus(ctx context.Context, requestURL string, args *ConnectionArgs) (I
 	}
 
 	server.http = httpClient
-	if args.AuthType == "oidc" {
+	if args.AuthType == api.AuthenticationMethodOIDC {
 		server.setupOIDCClient(args.OIDCTokens)
 	}
 

@@ -14,15 +14,15 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
-	"golang.org/x/term"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/incusd/migration"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/version"
-	"github.com/lxc/incus/shared/ws"
+	incus "github.com/lxc/incus/v6/client"
+	"github.com/lxc/incus/v6/internal/migration"
+	"github.com/lxc/incus/v6/internal/ports"
+	internalUtil "github.com/lxc/incus/v6/internal/util"
+	"github.com/lxc/incus/v6/internal/version"
+	"github.com/lxc/incus/v6/shared/api"
+	localtls "github.com/lxc/incus/v6/shared/tls"
+	"github.com/lxc/incus/v6/shared/ws"
 )
 
 func transferRootfs(ctx context.Context, dst incus.InstanceServer, op incus.Operation, rootfs string, rsyncArgs string, instanceType api.InstanceType) error {
@@ -73,7 +73,7 @@ func transferRootfs(ctx context.Context, dst incus.InstanceServer, op incus.Oper
 
 		size := stat.Size()
 		offerHeader.VolumeSize = &size
-		rootfs = shared.AddSlash(rootfs)
+		rootfs = internalUtil.AddSlash(rootfs)
 	}
 
 	err = migration.ProtoSend(wsControl, &offerHeader)
@@ -143,14 +143,21 @@ func transferRootfs(ctx context.Context, dst incus.InstanceServer, op incus.Oper
 	return nil
 }
 
-func connectTarget(url string, certPath string, keyPath string, authType string, token string) (incus.InstanceServer, string, error) {
+func (m *cmdMigrate) connectLocal() (incus.InstanceServer, error) {
+	args := incus.ConnectionArgs{}
+	args.UserAgent = fmt.Sprintf("LXC-MIGRATE %s", version.Version)
+
+	return incus.ConnectIncusUnix("", &args)
+}
+
+func (m *cmdMigrate) connectTarget(url string, certPath string, keyPath string, authType string, token string) (incus.InstanceServer, string, error) {
 	args := incus.ConnectionArgs{
 		AuthType: authType,
 	}
 
 	clientFingerprint := ""
 
-	if authType == "tls" {
+	if authType == api.AuthenticationMethodTLS {
 		var clientCrt []byte
 		var clientKey []byte
 
@@ -158,12 +165,12 @@ func connectTarget(url string, certPath string, keyPath string, authType string,
 		if certPath == "" || keyPath == "" {
 			var err error
 
-			clientCrt, clientKey, err = shared.GenerateMemCert(true, false)
+			clientCrt, clientKey, err = localtls.GenerateMemCert(true, false)
 			if err != nil {
 				return nil, "", err
 			}
 
-			clientFingerprint, err = shared.CertFingerprintStr(string(clientCrt))
+			clientFingerprint, err = localtls.CertFingerprintStr(string(clientCrt))
 			if err != nil {
 				return nil, "", err
 			}
@@ -197,7 +204,7 @@ func connectTarget(url string, certPath string, keyPath string, authType string,
 	var certificate *x509.Certificate
 	if err != nil {
 		// Failed to connect using the system CA, so retrieve the remote certificate
-		certificate, err = shared.GetRemoteCertificate(url, args.UserAgent)
+		certificate, err = localtls.GetRemoteCertificate(url, args.UserAgent)
 		if err != nil {
 			return nil, "", err
 		}
@@ -227,10 +234,10 @@ func connectTarget(url string, certPath string, keyPath string, authType string,
 		return c, "", nil
 	}
 
-	if authType == "tls" {
+	if authType == api.AuthenticationMethodTLS {
 		if token != "" {
 			req := api.CertificatesPost{
-				Password: token,
+				TrustToken: token,
 			}
 
 			err = c.CreateCertificate(req)
@@ -238,42 +245,13 @@ func connectTarget(url string, certPath string, keyPath string, authType string,
 				return nil, "", fmt.Errorf("Failed to create certificate: %w", err)
 			}
 		} else {
-			fmt.Println("It is recommended to have this certificate be manually added to Incus through `incus config trust add` on the target server.\nAlternatively you could use a pre-defined trust password to add it remotely (use of a trust password can be a security issue).")
-
+			fmt.Println("A temporary client certificate was generated, use `incus config trust add` on the target server.")
 			fmt.Println("")
 
-			useTrustPassword, err := cli.AskBool("Would you like to use a trust password? [default=no]: ", "no")
+			fmt.Print("Press ENTER after the certificate was added to the remote server: ")
+			_, err = bufio.NewReader(os.Stdin).ReadString('\n')
 			if err != nil {
 				return nil, "", err
-			}
-
-			if useTrustPassword {
-				// Prompt for trust password
-				fmt.Print("Trust password: ")
-				pwd, err := term.ReadPassword(0)
-				if err != nil {
-					return nil, "", err
-				}
-
-				fmt.Println("")
-
-				// Add client certificate to trust store
-				req := api.CertificatesPost{
-					Password: string(pwd),
-				}
-
-				req.Type = api.CertificateTypeClient
-
-				err = c.CreateCertificate(req)
-				if err != nil {
-					return nil, "", err
-				}
-			} else {
-				fmt.Print("Press ENTER after the certificate was added to the remote server: ")
-				_, err = bufio.NewReader(os.Stdin).ReadString('\n')
-				if err != nil {
-					return nil, "", err
-				}
 			}
 		}
 	} else {
@@ -341,7 +319,7 @@ func parseURL(URL string) (string, error) {
 
 	// If no port was provided, use default port
 	if u.Port() == "" {
-		u.Host = fmt.Sprintf("%s:%d", u.Hostname(), shared.HTTPSDefaultPort)
+		u.Host = fmt.Sprintf("%s:%d", u.Hostname(), ports.HTTPSDefaultPort)
 	}
 
 	return u.String(), nil

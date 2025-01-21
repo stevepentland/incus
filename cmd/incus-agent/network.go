@@ -3,17 +3,20 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
 
-	deviceConfig "github.com/lxc/incus/incusd/device/config"
-	"github.com/lxc/incus/incusd/ip"
-	"github.com/lxc/incus/incusd/revert"
-	"github.com/lxc/incus/incusd/util"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/logger"
+	"github.com/lxc/incus/v6/internal/linux"
+	deviceConfig "github.com/lxc/incus/v6/internal/server/device/config"
+	"github.com/lxc/incus/v6/internal/server/ip"
+	"github.com/lxc/incus/v6/internal/server/util"
+	"github.com/lxc/incus/v6/shared/logger"
+	"github.com/lxc/incus/v6/shared/revert"
+	localtls "github.com/lxc/incus/v6/shared/tls"
 )
 
 // A variation of the standard tls.Listener that supports atomically swapping
@@ -49,7 +52,7 @@ func (l *networkListener) Accept() (net.Conn, error) {
 }
 
 func serverTLSConfig() (*tls.Config, error) {
-	certInfo, err := shared.KeyPairAndCA(".", "agent", shared.CertServer, false)
+	certInfo, err := localtls.KeyPairAndCA(".", "agent", localtls.CertServer, false)
 	if err != nil {
 		return nil, err
 	}
@@ -64,13 +67,16 @@ func reconfigureNetworkInterfaces() {
 	nicDirEntries, err := os.ReadDir(deviceConfig.NICConfigDir)
 	if err != nil {
 		// Abort if configuration folder does not exist (nothing to do), otherwise log and return.
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return
 		}
 
 		logger.Error("Could not read network interface configuration directory", logger.Ctx{"err": err})
 		return
 	}
+
+	// Attempt to load the virtio_net driver in case it's not be loaded yet.
+	_ = linux.LoadModule("virtio_net")
 
 	// nicData is a map of MAC address to NICConfig.
 	nicData := make(map[string]deviceConfig.NICConfig, len(nicDirEntries))

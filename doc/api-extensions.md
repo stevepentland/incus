@@ -1,6 +1,6 @@
 # API extensions
 
-The changes below were introduced to the LXD API after the 1.0 API was finalized.
+The changes below were introduced to the Incus API after the 1.0 API was finalized.
 
 They are all backward compatible and can be detected by client tools by
 looking at the `api_extensions` field in `GET /1.0`.
@@ -9,7 +9,7 @@ looking at the `api_extensions` field in `GET /1.0`.
 
 A `storage.zfs_remove_snapshots` daemon configuration key was introduced.
 
-It's a Boolean that defaults to `false` and that when set to `true` instructs LXD
+It's a Boolean that defaults to `false` and that when set to `true` instructs Incus
 to remove any needed snapshot when attempting to restore another.
 
 This is needed as ZFS will only let you restore the latest snapshot.
@@ -18,10 +18,10 @@ This is needed as ZFS will only let you restore the latest snapshot.
 
 A `boot.host_shutdown_timeout` container configuration key was introduced.
 
-It's an integer which indicates how long LXD should wait for the container
+It's an integer which indicates how long Incus should wait for the container
 to stop before killing it.
 
-Its value is only used on clean LXD daemon shutdown. It defaults to 30s.
+Its value is only used on clean Incus daemon shutdown. It defaults to 30s.
 
 ## `container_stop_priority`
 
@@ -73,8 +73,8 @@ And adds support for the following HTTP header on PUT requests:
 
 * If-Match (ETag value retrieved through previous GET)
 
-This makes it possible to GET a LXD object, modify it and PUT it without
-risking to hit a race condition where LXD or another client modified the
+This makes it possible to GET an Incus object, modify it and PUT it without
+risking to hit a race condition where Incus or another client modified the
 object in the meantime.
 
 ## `patch`
@@ -89,7 +89,7 @@ Add support for USB hotplug.
 
 ## `https_allowed_credentials`
 
-To use LXD API with all Web Browsers (via SPAs) you must send credentials
+To use Incus API with all Web Browsers (via SPAs) you must send credentials
 (certificate) with each XHR (in order for this to happen, you should set
 [`withCredentials=true`](https://developer.mozilla.org/en-US/docs/Web/API/XMLHttpRequest/withCredentials)
 flag to each XHR Request).
@@ -106,8 +106,8 @@ Setting this property overrides the server default value (`images.compression_al
 
 ## `directory_manipulation`
 
-This allows for creating and listing directories via the LXD API, and exports
-the file type via the X-LXD-type header, which can be either `file` or
+This allows for creating and listing directories via the Incus API, and exports
+the file type via the X-Incus-type header, which can be either `file` or
 `directory` right now.
 
 ## `container_cpu_time`
@@ -116,9 +116,9 @@ This adds support for retrieving CPU time for a running container.
 
 ## `storage_zfs_use_refquota`
 
-Introduces a new server property `storage.zfs_use_refquota` which instructs LXD
+Introduces a new server property `storage.zfs_use_refquota` which instructs Incus
 to set the `refquota` property instead of `quota` when setting a size limit
-on a container. LXD will also then use `usedbydataset` in place of `used`
+on a container. Incus will also then use `usedbydataset` in place of `used`
 when being queried about disk utilization.
 
 This effectively controls whether disk usage by snapshots should be
@@ -132,7 +132,7 @@ options for the file system used by the LVM LV.
 
 ## `network`
 
-Network management API for LXD.
+Network management API for Incus.
 
 This includes:
 
@@ -214,11 +214,11 @@ Rules necessary for `dnsmasq` to work (DHCP/DNS) will always be applied if
 
 ## `network_routes`
 
-Introduces `ipv4.routes` and `ipv6.routes` which allow routing additional subnets to a LXD bridge.
+Introduces `ipv4.routes` and `ipv6.routes` which allow routing additional subnets to an Incus bridge.
 
 ## `storage`
 
-Storage management API for LXD.
+Storage management API for Incus.
 
 This includes:
 
@@ -250,7 +250,7 @@ Implements `DELETE` in `/1.0/containers/<name>/files`
 
 ## `file_append`
 
-Implements the `X-LXD-write` header which can be one of `overwrite` or `append`.
+Implements the `X-Incus-write` header which can be one of `overwrite` or `append`.
 
 ## `network_dhcp_expiry`
 
@@ -268,7 +268,7 @@ Introduces the ability to rename a thin pool name by setting `storage.thinpool_n
 
 This adds a new `vlan` property to `macvlan` network devices.
 
-When set, this will instruct LXD to attach to the specified VLAN. LXD
+When set, this will instruct Incus to attach to the specified VLAN. Incus
 will look for an existing interface for that VLAN on the host. If one
 can't be found it will create one itself and then use that as the
 macvlan parent.
@@ -281,7 +281,7 @@ be set at image creation/import time.
 ## `container_stateless_copy`
 
 This introduces a new `live` attribute in `POST /1.0/containers/<name>`.
-Setting it to `false` tells LXD not to attempt running state transfer.
+Setting it to `false` tells Incus not to attempt running state transfer.
 
 ## `container_only_migration`
 
@@ -347,21 +347,21 @@ UID/GID to use as the base.
 ## `file_symlinks`
 
 This adds support for transferring symlinks through the file API.
-X-LXD-type can now be `symlink` with the request content being the target path.
+X-Incus-type can now be `symlink` with the request content being the target path.
 
 ## `container_push_target`
 
 This adds the `target` field to `POST /1.0/containers/<name>` which can be
-used to have the source LXD host connect to the target during migration.
+used to have the source Incus host connect to the target during migration.
 
 ## `network_vlan_physical`
 
 Allows use of `vlan` property with `physical` network devices.
 
-When set, this will instruct LXD to attach to the specified VLAN on the `parent` interface.
-LXD will look for an existing interface for that `parent` and VLAN on the host.
+When set, this will instruct Incus to attach to the specified VLAN on the `parent` interface.
+Incus will look for an existing interface for that `parent` and VLAN on the host.
 If one can't be found it will create one itself.
-Then, LXD will directly attach this interface to the container.
+Then, Incus will directly attach this interface to the container.
 
 ## `storage_images_delete`
 
@@ -389,17 +389,17 @@ This adds the ability to specify the Ceph user.
 ## `instance_types`
 
 This adds the `instance_type` field to the container creation request.
-Its value is expanded to LXD resource limits.
+Its value is expanded to Incus resource limits.
 
 ## `storage_volatile_initial_source`
 
-This records the actual source passed to LXD during storage pool creation.
+This records the actual source passed to Incus during storage pool creation.
 
 ## `storage_ceph_force_osd_reuse`
 
 This introduces the `ceph.osd.force_reuse` property for the Ceph storage
-driver. When set to `true` LXD will reuse an OSD storage pool that is already in
-use by another LXD instance.
+driver. When set to `true` Incus will reuse an OSD storage pool that is already in
+use by another Incus instance.
 
 ## `storage_block_filesystem_btrfs`
 
@@ -408,7 +408,7 @@ and `xfs`.
 
 ## `resources`
 
-This adds support for querying a LXD daemon for the system resources it has
+This adds support for querying an Incus daemon for the system resources it has
 available.
 
 ## `kernel_limits`
@@ -428,11 +428,11 @@ This adds support for SR-IOV enabled network devices.
 
 This adds support to interact with the container console device and console log.
 
-## `restrict_devlxd`
+## `restrict_dev_incus`
 
-A new `security.devlxd` container configuration key was introduced.
-The key controls whether the `/dev/lxd` interface is made available to the container.
-If set to `false`, this effectively prevents the container from interacting with the LXD daemon.
+A new `security.guestapi` container configuration key was introduced.
+The key controls whether the `/dev/incus` interface is made available to the container.
+If set to `false`, this effectively prevents the container from interacting with the Incus daemon.
 
 ## `migration_pre_copy`
 
@@ -442,11 +442,11 @@ This adds support for optimized memory transfer during live migration.
 
 This adds support to use InfiniBand network devices.
 
-## `devlxd_events`
+## `dev_incus_events`
 
-This adds a WebSocket API to the `devlxd` socket.
+This adds a WebSocket API to the `/dev/incus` socket.
 
-When connecting to `/1.0/events` over the `devlxd` socket, you will now be
+When connecting to `/1.0/events` over the `/dev/incus` socket, you will now be
 getting a stream of events over WebSocket.
 
 ## `proxy`
@@ -465,7 +465,7 @@ This makes it possible to retrieve symlinks using the file API.
 ## `network_leases`
 
 Adds a new `/1.0/networks/NAME/leases` API endpoint to query the lease database on
-bridges which run a LXD-managed DHCP server.
+bridges which run an Incus-managed DHCP server.
 
 ## `unix_device_hotplug`
 
@@ -482,7 +482,7 @@ Adds a `description` field to all operations.
 
 ## `clustering`
 
-Clustering API for LXD.
+Clustering API for Incus.
 
 This includes the following new endpoints (see [RESTful API](rest-api.md) for details):
 
@@ -547,16 +547,16 @@ The following existing endpoint has been modified:
 
 * `POST /1.0/containers` accepts the new source type `backup`
 
-## `devlxd_images`
+## `dev_incus_images`
 
-Adds a `security.devlxd.images` configuration option for containers which
+Adds a `security.guestapi.images` configuration option for containers which
 controls the availability of a `/1.0/images/FINGERPRINT/export` API over
-`devlxd`. This can be used by a container running nested LXD to access raw
+`/dev/incus`. This can be used by a container running nested Incus to access raw
 images from the host.
 
 ## `container_local_cross_pool_handling`
 
-This enables copying or moving containers between storage pools on the same LXD
+This enables copying or moving containers between storage pools on the same Incus
 instance.
 
 ## `proxy_unix`
@@ -648,15 +648,15 @@ will be done via `iptables` instead of proxy devices.
 
 ## `network_nat_order`
 
-This introduces the `ipv4.nat.order` and `ipv6.nat.order` configuration keys for LXD bridges.
-Those keys control whether to put the LXD rules before or after any pre-existing rules in the chain.
+This introduces the `ipv4.nat.order` and `ipv6.nat.order` configuration keys for Incus bridges.
+Those keys control whether to put the Incus rules before or after any pre-existing rules in the chain.
 
 ## `container_full`
 
 This introduces a new `recursion=2` mode for `GET /1.0/containers` which allows for the retrieval of
 all container structs, including the state, snapshots and backup structs.
 
-This effectively allows for `lxc list` to get all it needs in one query.
+This effectively allows for [`incus list`](incus_list.md) to get all it needs in one query.
 
 ## `backup_compression`
 
@@ -702,7 +702,7 @@ attaching it to the container which requires write access.
 Add a new project API, supporting creation, update and deletion of projects.
 
 Projects can hold containers, profiles or images at this point and let
-you get a separate view of your LXD resources by switching to it.
+you get a separate view of your Incus resources by switching to it.
 
 ## `network_vxlan_ttl`
 
@@ -772,7 +772,7 @@ parts have to be used.
 
 Snapshots which are then created will be given an expiry date based on the
 expression. This expiry date, defined by `expires_at`, can be manually edited
-using the API or `lxc config edit`. Snapshots with a valid expiry date will be
+using the API or [`incus config edit`](incus_config_edit.md). Snapshots with a valid expiry date will be
 removed when the task in run. Expiry can be disabled by setting `expires_at` to
 an empty string or `0001-01-01T00:00:00Z` (zero time). This is the default if
 `snapshots.expiry` is not set.
@@ -820,7 +820,7 @@ This effectively gives us:
 * `volatile.idmap.next` => Next on-disk idmap
 
 This is required to implement environments where the on-disk map isn't
-changed but the kernel map is (e.g. `shiftfs`).
+changed but the kernel map is (e.g. `idmapped mounts`).
 
 ## `event_location`
 
@@ -832,7 +832,7 @@ This allows migrating storage volumes including their snapshots.
 
 ## `network_nat_address`
 
-This introduces the `ipv4.nat.address` and `ipv6.nat.address` configuration keys for LXD bridges.
+This introduces the `ipv4.nat.address` and `ipv6.nat.address` configuration keys for Incus bridges.
 Those keys control the source address used for outbound traffic from the bridge.
 
 ## `container_nic_routes`
@@ -843,18 +843,18 @@ This allows adding static routes on host to container's NIC.
 ## `cluster_internal_copy`
 
 This makes it possible to do a normal `POST /1.0/containers` to copy a
-container between cluster nodes with LXD internally detecting whether a
+container between cluster nodes with Incus internally detecting whether a
 migration is required.
 
 ## `seccomp_notify`
 
-If the kernel supports `seccomp`-based syscall interception LXD can be notified
-by a container that a registered syscall has been performed. LXD can then
+If the kernel supports `seccomp`-based syscall interception Incus can be notified
+by a container that a registered syscall has been performed. Incus can then
 decide to trigger various actions.
 
 ## `lxc_features`
 
-This introduces the `lxc_features` section output from the `lxc info` command
+This introduces the `lxc_features` section output from the [`incus info`](incus_info.md) command
 via the `GET /1.0` route. It outputs the result of checks for key features being present in the
 underlying LXC library.
 
@@ -904,12 +904,12 @@ Adds support for specifying `User`, `Group` and `Cwd` during `POST /1.0/containe
 ## `container_syscall_intercept`
 
 Adds the `security.syscalls.intercept.*` configuration keys to control
-what system calls will be intercepted by LXD and processed with
+what system calls will be intercepted by Incus and processed with
 elevated permissions.
 
 ## `container_disk_shift`
 
-Adds the `shift` property on `disk` devices which controls the use of the `shiftfs` overlay.
+Adds the `shift` property on `disk` devices which controls the use of the `idmapped mounts` overlay.
 
 ## `storage_shifted`
 
@@ -919,7 +919,7 @@ Setting it to `true` will allow multiple isolated containers to attach the
 same storage volume while keeping the file system writable from all of
 them.
 
-This makes use of `shiftfs` as an overlay file system.
+This makes use of `idmapped mounts` as an overlay file system.
 
 ## `resources_infiniband`
 
@@ -981,7 +981,7 @@ in the pool specified by `pool_name`.
 Adds the `security.syscalls.intercept.mount`,
 `security.syscalls.intercept.mount.allowed`, and
 `security.syscalls.intercept.mount.shift` configuration keys to control whether
-and how the `mount` system call will be intercepted by LXD and processed with
+and how the `mount` system call will be intercepted by Incus and processed with
 elevated permissions.
 
 ## `compression_squashfs`
@@ -1004,9 +1004,9 @@ redirect file-system mounts to their fuse implementation. To this end, set e.g.
 
 ## `container_disk_ceph`
 
-This allows for existing a Ceph RBD or CephFS to be directly connected to a LXD container.
+This allows for existing a Ceph RBD or CephFS to be directly connected to an Incus container.
 
-## `virtual_machines`
+## `virtual-machines`
 
 Add virtual machine support.
 
@@ -1057,14 +1057,14 @@ Adds the `Firewall` property to the `ServerEnvironment` struct indicating the fi
 ## `storage_lvm_vg_force_reuse`
 
 Introduces the ability to create a storage pool from an existing non-empty volume group.
-This option should be used with care, as LXD can then not guarantee that volume name conflicts won't occur
-with non-LXD created volumes in the same volume group.
-This could also potentially lead to LXD deleting a non-LXD volume should name conflicts occur.
+This option should be used with care, as Incus can then not guarantee that volume name conflicts won't occur
+with non-Incus created volumes in the same volume group.
+This could also potentially lead to Incus deleting a non-Incus volume should name conflicts occur.
 
 ## `container_syscall_intercept_hugetlbfs`
 
 When mount syscall interception is enabled and `hugetlbfs` is specified as an
-allowed file system type LXD will mount a separate `hugetlbfs` instance for the
+allowed file system type Incus will mount a separate `hugetlbfs` instance for the
 container with the UID and GID mount options set to the container's root UID
 and GID. This ensures that processes in the container can use huge pages.
 
@@ -1396,7 +1396,7 @@ This introduces the `tpm` device type.
 
 ## `storage_zfs_clone_copy_rebase`
 
-This introduces `rebase` as a value for `zfs.clone_copy` causing LXD to
+This introduces `rebase` as a value for `zfs.clone_copy` causing Incus to
 track down any `image` dataset in the ancestry line and then perform
 send/receive on top of that.
 
@@ -1536,7 +1536,7 @@ to specify what cluster member to place a workload on or the ability to move a w
 
 ## `images_default_architecture`
 
-Adds new `images.default_architecture` global configuration key and matching per-project key which lets user tell LXD
+Adds new `images.default_architecture` global configuration key and matching per-project key which lets user tell Incus
 what architecture to go with when no specific one is specified as part of the image request.
 
 ## `network_ovn_acl_defaults`
@@ -1562,7 +1562,7 @@ specifying the default behavior for unmatched traffic.
 
 ## `warnings`
 
-Warning API for LXD.
+Warning API for Incus.
 
 This includes the following endpoints (see  [Restful API](rest-api.md) for details):
 
@@ -1588,7 +1588,7 @@ Adds an editable description to the cluster members.
 
 ## `server_trusted_proxy`
 
-This introduces support for `core.https_trusted_proxy` which has LXD
+This introduces support for `core.https_trusted_proxy` which has Incus
 parse a HAProxy style connection header on such connections and if
 present, will rewrite the request's source address to that provided by
 the proxy server.
@@ -1605,7 +1605,7 @@ This adds support for copy/move custom storage volumes between projects.
 ## `server_instance_driver_operational`
 
 This modifies the `driver` output for the `/1.0` endpoint to only include drivers which are actually supported and
-operational on the server (as opposed to being included in LXD but not operational on the server).
+operational on the server (as opposed to being included in Incus but not operational on the server).
 
 ## `server_supported_storage_drivers`
 
@@ -1613,7 +1613,7 @@ This adds supported storage driver info to server environment info.
 
 ## `event_lifecycle_requestor_address`
 
-Adds a new address field to life-cycle requestor.
+Adds a new address field to `lifecycle` requestor.
 
 ## `resources_gpu_usb`
 
@@ -1626,13 +1626,13 @@ It also adds the configuration keys `cluster.evacuate` and `volatile.evacuate.or
 
 ## `network_ovn_nat_address`
 
-This introduces the `ipv4.nat.address` and `ipv6.nat.address` configuration keys for LXD `ovn` networks.
+This introduces the `ipv4.nat.address` and `ipv6.nat.address` configuration keys for Incus `ovn` networks.
 Those keys control the source address used for outbound traffic from the OVN virtual network.
 These keys can only be specified when the OVN network's uplink network has `ovn.ingress_mode=routed`.
 
 ## `network_bgp`
 
-This introduces support for LXD acting as a BGP router to advertise
+This introduces support for Incus acting as a BGP router to advertise
 routes to `bridge` and `ovn` networks.
 
 This comes with the addition to global configuration of:
@@ -1646,6 +1646,9 @@ The following network configurations keys (`bridge` and `physical`):
 * `bgp.peers.<name>.address`
 * `bgp.peers.<name>.asn`
 * `bgp.peers.<name>.password`
+
+The `nexthop` configuration keys (`bridge`):
+
 * `bgp.ipv4.nexthop`
 * `bgp.ipv6.nexthop`
 
@@ -1669,7 +1672,7 @@ This adds the received and sent errors as well as inbound and outbound dropped p
 
 ## `metrics`
 
-This adds metrics to LXD. It returns metrics of running instances using the OpenMetrics format.
+This adds metrics to Incus. It returns metrics of running instances using the OpenMetrics format.
 
 This includes the following endpoints:
 
@@ -1695,7 +1698,7 @@ within containers.
 
 ## `network_dns`
 
-Introduces a built-in DNS server and zones API to provide DNS records for LXD instances.
+Introduces a built-in DNS server and zones API to provide DNS records for Incus instances.
 
 This introduces the following server configuration key:
 
@@ -1742,14 +1745,14 @@ This adds a new `cloud-init` configuration key namespace which contains the foll
 * `cloud-init.user-data`
 * `cloud-init.network-config`
 
- It also adds a new endpoint `/1.0/devices` to `devlxd` which shows an instance's devices.
+ It also adds a new endpoint `/1.0/devices` to `/dev/incus` which shows an instance's devices.
 
 ## `network_dns_nat`
 
 This introduces `network.nat` as a configuration option on network zones (DNS).
 
 It defaults to the current behavior of generating records for all
-instances NICs but if set to `false`, it will instruct LXD to only
+instances NICs but if set to `false`, it will instruct Incus to only
 generate records for externally reachable addresses.
 
 ## `database_leader`
@@ -1786,7 +1789,7 @@ all instance structs, including the state, snapshots and backup structs.
 ## `qemu_metrics`
 
 This adds a new `security.agent.metrics` Boolean which defaults to `true`.
-When set to `false`, it doesn't connect to the `lxd-agent` for metrics and other state information, but relies on stats from QEMU.
+When set to `false`, it doesn't connect to the `incus-agent` for metrics and other state information, but relies on stats from QEMU.
 
 ## `gpu_mig_uuid`
 
@@ -1843,6 +1846,10 @@ This adds:
 * `PATCH /1.0/network-zones/ZONE/records/RECORD`
 * `DELETE /1.0/network-zones/ZONE/records/RECORD`
 
+## `network_zones_all_projects`
+
+This adds support for listing network zones across all projects through the `all-projects` parameter on the `GET /1.0/network-zones`API.
+
 ## `storage_zfs_reserve_space`
 
 Adds ability to set the `reservation`/`refreservation` ZFS property along with `quota`/`refquota`.
@@ -1857,7 +1864,7 @@ Introduces a new `zfs.blocksize` property for ZFS storage volumes which allows t
 
 ## `metrics_cpu_seconds`
 
-This is used to detect whether LXD was fixed to output used CPU time in seconds rather than as milliseconds.
+This is used to detect whether Incus was fixed to output used CPU time in seconds rather than as milliseconds.
 
 ## `instance_snapshot_never`
 
@@ -1881,7 +1888,7 @@ This adds support for `event-hub` cluster member role and the `ServerEventMode` 
 
 ## `agent_nic_config`
 
-If set to `true`, on VM start-up the `lxd-agent` will apply NIC configuration to change the names and MTU of the instance NIC
+If set to `true`, on VM start-up the `incus-agent` will apply NIC configuration to change the names and MTU of the instance NIC
 devices.
 
 ## `projects_restricted_intercept`
@@ -1897,6 +1904,10 @@ client authentication.
 ## `images_target_project`
 
 Adds ability to copy image to a project different from the source.
+
+## `images_all_projects`
+
+This adds support for listing images across all projects through the `all-projects` parameter on the `GET /1.0/images`API.
 
 ## `cluster_migration_inconsistent_copy`
 
@@ -1929,7 +1940,7 @@ Implements HEAD on `/1.0/instances/NAME/file`.
 
 This introduces the `instances.nic.host_name` server configuration key that can take a value of either `random` or
 `mac`. The default value for the key if unspecified is `random`. If it is set to random then use the random host interface names.
-If it's set to `mac`, then generate a name in the form `lxd1122334455`.
+If it's set to `mac`, then generate a name in the form `inc1122334455`.
 
 ## `image_copy_profile`
 
@@ -1965,11 +1976,11 @@ IP addresses that can be forwarded to one or more internal IP(s) inside their re
 
 ## `vsock_api`
 
-This introduces a bidirectional `vsock` interface which allows the `lxd-agent` and the LXD server to communicate better.
+This introduces a bidirectional `vsock` interface which allows the `incus-agent` and the Incus server to communicate better.
 
 ## `instance_ready_state`
 
-This introduces a new `Ready` state for instances which can be set using `devlxd`.
+This introduces a new `Ready` state for instances which can be set using `/dev/incus`.
 
 ## `network_bgp_holdtime`
 
@@ -1981,7 +1992,7 @@ This introduces the ability to list storage volumes from all projects.
 
 ## `metrics_memory_oom_total`
 
-This introduces a new `lxd_memory_OOM_kills_total` metric to the `/1.0/metrics` API.
+This introduces a new `incus_memory_OOM_kills_total` metric to the `/1.0/metrics` API.
 It reports the number of times the out of memory killer (`OOM`) has been triggered.
 
 ## `storage_buckets`
@@ -1993,7 +2004,7 @@ This introduces the storage bucket API. It allows the management of S3 object st
 This updates the storage bucket API to return initial admin credentials at bucket creation time.
 
 ## `metrics_cpu_effective_total`
-This introduces a new `lxd_cpu_effective_total` metric to the `/1.0/metrics` API.
+This introduces a new `incus_cpu_effective_total` metric to the `/1.0/metrics` API.
 It reports the total number of effective CPUs.
 
 ## `projects_networks_restricted_access`
@@ -2018,7 +2029,7 @@ This adds support for sending life cycle and logging events to a Loki server.
 It adds the following global configuration keys:
 
 * `loki.api.ca_cert`: CA certificate which can be used when sending events to the Loki server
-* `loki.api.url`: URL to the Loki server
+* `loki.api.url`: URL to the Loki server (protocol, name or IP and port)
 * `loki.auth.username` and `loki.auth.password`: Used if Loki is behind a reverse proxy with basic authentication enabled
 * `loki.labels`: Comma-separated list of values which are to be used as labels for Loki events.
 * `loki.loglevel`: Minimum log level for events sent to the Loki server.
@@ -2098,13 +2109,13 @@ Adds `GET /1.0/cluster/members/<member>/state` API endpoint and associated `Clus
 
 ## `instances_placement_scriptlet`
 
-Adds support for a Starlark scriptlet to be provided to LXD to allow customized logic that controls placement of new instances in a cluster.
+Adds support for a Starlark scriptlet to be provided to Incus to allow customized logic that controls placement of new instances in a cluster.
 
-The Starlark scriptlet is provided to LXD via the new global configuration option `instances.placement.scriptlet`.
+The Starlark scriptlet is provided to Incus via the new global configuration option `instances.placement.scriptlet`.
 
 ## `storage_pool_source_wipe`
 Adds support for a `source.wipe` Boolean on the storage pool, indicating
-that LXD should wipe partition headers off the requested disk rather
+that Incus should wipe partition headers off the requested disk rather
 than potentially fail due to pre-existing file systems.
 
 ## `zfs_block_mode`
@@ -2201,10 +2212,10 @@ This introduces:
 ## `security_csm`
 Introduce a new `security.csm` configuration key to control the use of
 `CSM` (Compatibility Support Module) to allow legacy operating systems to
-be run in LXD VMs.
+be run in Incus VMs.
 
 ## `instances_rebuild`
-This extension adds the ability to rebuild an instance with the same origin image, alternate image or as empty. A new `POST /1.0/instances/<name>/rebuild?project=<project>` API endpoint has been added as well as a new CLI command `lxc rebuild`.
+This extension adds the ability to rebuild an instance with the same origin image, alternate image or as empty. A new `POST /1.0/instances/<name>/rebuild?project=<project>` API endpoint has been added as well as a new CLI command [`incus rebuild`](incus_rebuild.md).
 
 ## `numa_cpu_placement`
 This adds the possibility to place a set of CPUs in a desired set of NUMA nodes.
@@ -2216,11 +2227,465 @@ This adds the following new configuration key:
 ## `custom_volume_iso`
 This adds the possibility to import ISO images as custom storage volumes.
 
-This adds the `--type` flag to `lxc storage volume import`.
+This adds the `--type` flag to [`incus storage volume import`](incus_storage_volume_import.md).
 
 ## `network_allocations`
-This adds the possibility to list a LXD deployment's network allocations.
+This adds the possibility to list an Incus deployment's network allocations.
 
-Through the `lxc network list-allocations` command and the `--project <PROJECT> | --all-projects` flags,
+Through the [`incus network list-allocations`](incus_network_list-allocations.md) command and the `--project <PROJECT> | --all-projects` flags,
 you can list all the used IP addresses, hardware addresses (for instances), resource URIs and whether it uses NAT for
 each `instance`, `network`, `network forward` and `network load-balancer`.
+
+## `zfs_delegate`
+This implements a new `zfs.delegate` volume Boolean for volumes on a ZFS storage driver.
+When enabled and a suitable system is in use (requires ZFS 2.2 or higher), the ZFS dataset will be delegated to the container, allowing for its use through the `zfs` command line tool.
+
+## `storage_api_remote_volume_snapshot_copy`
+
+This allows copying storage volume snapshots to and from remotes.
+
+## `operations_get_query_all_projects`
+
+This introduces support for the `all-projects` query parameter for the GET API calls to both `/1.0/operations` and `/1.0/operations?recursion=1`.
+This parameter allows bypassing the project name filter.
+
+## `metadata_configuration`
+Adds the `GET /1.0/metadata/configuration` API endpoint to retrieve the generated metadata configuration in a JSON format. The JSON structure adopts the structure ```"configs" > `ENTITY` > `ENTITY_SECTION` > "keys" > [<CONFIG_OPTION_0>, <CONFIG_OPTION_1>, ...]```.
+Check the list of {doc}`configuration options </config-options>` to see which configuration options are included.
+
+## `syslog_socket`
+
+This introduces a syslog socket that can receive syslog formatted log messages. These can be viewed in the events API and `incus monitor`, and can be forwarded to Loki. To enable this feature, set `core.syslog_socket` to `true`.
+
+## `event_lifecycle_name_and_project`
+
+This adds the fields `Name` and `Project` to `lifecycle` events.
+
+## `instances_nic_limits_priority`
+
+This introduces a new per-NIC `limits.priority` option that works with both cgroup1 and cgroup2 unlike the deprecated `limits.network.priority` instance setting, which only worked with cgroup1.
+
+## `disk_initial_volume_configuration`
+
+This API extension provides the capability to set initial volume configurations for instance root devices.
+Initial volume configurations are prefixed with `initial.` and can be specified either through profiles or directly
+during instance initialization using the `--device` flag.
+
+Note that these configuration are applied only at the time of instance creation and subsequent modifications have
+no effect on existing devices.
+
+## `operation_wait`
+
+This API extension indicates that the `/1.0/operations/{id}/wait` endpoint exists on the server. This indicates to the client
+that the endpoint can be used to wait for an operation to complete rather than waiting for an operation event via the
+`/1.0/events` endpoint.
+
+## `image_restriction_privileged`
+
+This extension adds a new image restriction, `requirements.privileged` which when `false` indicates that an image cannot be run in a privileged container.
+
+## `cluster_internal_custom_volume_copy`
+
+This extension adds support for copying and moving custom storage volumes within a cluster with a single API call.
+Calling `POST /1.0/storage-pools/<pool>/custom?target=<target>` will copy the custom volume specified in the `source` part of the request.
+Calling `POST /1.0/storage-pools/<pool>/custom/<volume>?target=<target>` will move the custom volume from the source, specified in the `source` part of the request, to the target.
+
+## `disk_io_bus`
+This introduces a new `io.bus` property to disk devices which can be used to override the bus the disk is attached to.
+
+## `storage_cephfs_create_missing`
+This introduces the configuration keys `cephfs.create_missing`, `cephfs.osd_pg_num`, `cephfs.meta_pool` and `cephfs.osd_pool` to be used when adding a `cephfs` storage pool to instruct Incus to create the necessary entities for the storage pool, if they do not exist.
+
+## `instance_move_config`
+
+This API extension provides the ability to use flags `--profile`, `--no-profile`, `--device`, and `--config`
+when moving an instance between projects and/or storage pools.
+
+## `ovn_ssl_config`
+This introduces new server configuration keys to provide the SSL CA and client key pair to access the OVN databases.
+The new configuration keys are `network.ovn.ca_cert`, `network.ovn.client_cert` and `network.ovn.client_key`.
+
+## `certificate_description`
+
+Adds a `description` field to certificate.
+
+## `disk_io_bus_virtio_blk`
+
+Adds a new `virtio-blk` value for `io.bus` on `disk` devices which allows
+for the attached disk to be connected to the `virtio-blk` bus.
+
+## `loki_config_instance`
+
+Adds a new `loki.instance` server configuration key to customize the `instance` field in Loki events.
+This can be used to expose the name of the cluster rather than the individual system name sending
+the event as that's usually already covered by the `location` field.
+
+## `instance_create_start`
+
+Adds a new `start` field to the `POST /1.0/instances` API which when set
+to `true` will have the instance automatically start upon creation.
+
+In this scenario, the creation and startup is part of a single background operation.
+
+## `clustering_evacuation_stop_options`
+
+This introduces new options for the `cluster.evacuate` option:
+
+* `stateful-stop` has the instance store its state to disk to be resume on restore.
+* `force-stop` has the instance immediately stopped without waiting for it to shut down.
+
+## `boot_host_shutdown_action`
+
+This introduces a new `boot.host_shutdown_action` instance configuration key which can be used to override the default `stop` behavior on system shutdown.
+It supports the value `stop`, `stateful-stop` and `force-stop`.
+
+## `agent_config_drive`
+
+This introduces a new `agent:config` disk `source` which can be used to expose an ISO to the VM guest containing the agent and its configuration.
+
+## `network_state_ovn_lr`
+
+Adds a new `LogicalRouter` field to the `NetworkStateOVN` struct which is part of the `GET /1.0/networks/NAME/state` API.
+
+This is used to get the OVN logical router name.
+
+## `image_template_permissions`
+
+This adds `uid`, `gid` and `mode` fields to the image metadata template entries.
+
+## `storage_bucket_backup`
+
+Add storage bucket backup support.
+
+This includes the following new endpoints (see [RESTful API](rest-api.md) for details):
+
+* `GET /1.0/storage-pools/<pool>/buckets/<bucket>/backups`
+* `POST /1.0/storage-pools/<pool>/buckets/<bucket>/backups`
+
+* `GET /1.0/storage-pools/<pool>/buckets/<bucket>/backups/<name>`
+* `POST /1.0/storage-pools/<pool>/buckets/<bucket>/backups/<name>`
+* `DELETE /1.0/storage-pools/<pool>/buckets/<bucket>/backups/<name>`
+
+* `GET /1.0/storage-pools/<pool>/buckets/<bucket>/backups/<name>/export`
+
+## `storage_lvm_cluster`
+
+This adds a new `lvmcluster` storage driver which makes use of LVM shared VG through `lvmlockd`.
+
+With this, it's possible to have a single shared LVM pool across multiple servers so long as they all see the same backing device(s).
+
+## `shared_custom_block_volumes`
+
+This adds a new configuration key `security.shared` to custom block volumes.
+If unset or `false`, the custom block volume cannot be attached to multiple instances.
+This feature was added to prevent data loss which can happen when custom block volumes are attached to multiple instances at once.
+
+## `auth_tls_jwt`
+
+This adds the ability to use a signed `JSON Web Token` (`JWT`) instead of using the TLS client certificate directly.
+
+In this scenario, the client derives a `JWT` from their own TLS client certificate providing it as a `bearer` token through the `Authorization` HTTP header.
+
+The `JWT` must have the certificate's fingerprint as its `Subject` and must be signed by the client's private key.
+
+## `oidc_claim`
+
+This introduces a new `oidc.claim` server configuration key which can be used to specify what OpenID Connect claim to use as the username.
+
+## `device_usb_serial`
+
+This adds a new configuration key `serial` for device type `usb`.
+Feature has been added, to make it possible to distinguish between devices with identical `vendorid` and `productid`.
+
+## `numa_cpu_balanced`
+
+This adds `balanced` as a new value for `limits.cpu.nodes`.
+
+When set to `balanced`, Incus will attempt to select the least busy NUMA
+node at startup time for the instance, trying to keep the load spread
+across NUMA nodes on the system.
+
+## `image_restriction_nesting`
+
+This extension adds a new image restriction, `requirements.nesting` which when `true` indicates that an image cannot be run without nesting.
+
+## `network_integrations`
+
+Adds the concept of network integrations and initial support for OVN Interconnection.
+
+New API:
+
+* `/1.0/network-integrations` (GET, POST)
+* `/1.0/network-integrations/NAME` (GET, PUT, PATCH, DELETE, POST)
+
+Each integration is made of:
+
+* name
+* description
+* type (only `ovn` for now)
+* configuration
+   * `ovn.northbound_connection` (database connection string for the OVN Interconnection database)
+   * `ovn.ca_cert` (optional, SSL CA certificate for the OVN Interconnection database)
+   * `ovn.client_cert` (optional, SSL client certificate to connect to the OVN Interconnection database)
+   * `ovn.client_key` (optional, SSL client key to connect to the OVN Interconnection database)
+   * `ovn.transit.pattern` (Pongo2 template to generate the transit switch name)
+
+Those integrations attach to network peers through some new fields:
+
+* `type` (`local` for current behavior, `remote` for integrations)
+* `target_integration` (reference to the integration)
+
+## `instance_memory_swap_bytes`
+
+This extends `limits.memory.swap` to allow for a total limit in bytes.
+
+## `network_bridge_external_create`
+
+This adds the ability for `bridge.external_interfaces` to create a parent interface using a `interface/parent/vlan` syntax.
+
+## `storage_zfs_vdev`
+
+This adds support for `mirror`, `raidz1` and `raidz2` ZFS `vdev` types by extending storage `source` configuration.
+
+## `container_migration_stateful`
+
+A `migration.stateful` configuration key was introduced.
+
+It's a Boolean flag set to true whenever the container is in a stateful mode
+during the start, stop, and snapshot functions.
+
+This makes it less likely for users to run into CRIU errors when copying
+containers to another system.
+
+## `profiles_all_projects`
+
+This adds support for listing profiles across all projects through the `all-projects` parameter on the `GET /1.0/profiles`API.
+
+## `instances_scriptlet_get_instances`
+
+This allows the instance scriptlet to fetch a list of instances given an optional Project or Location filter.
+
+## `instances_scriptlet_get_cluster_members`
+
+This allows the instance scriptlet to fetch a list of cluster members given an optional cluster group.
+
+## `instances_scriptlet_get_project`
+
+This allows the instance scriptlet to fetch a project given name of a project.
+
+## `network_acl_stateless`
+
+This adds support for stateless rules in network ACLs.
+
+## `instance_state_started_at`
+
+This adds a `started_at` timestamp to the instance state API.
+
+## `networks_all_projects`
+
+This adds support for listing networks across all projects through the `all-projects` parameter on the `GET /1.0/networks`API.
+
+## `network_acls_all_projects`
+
+This adds support for listing network ACLs across all projects through the `all-projects` parameter on the `GET /1.0/network-acls`API.
+
+## `storage_buckets_all_projects`
+
+This adds support for listing storage buckets across all projects through the `all-projects` parameter on the `GET /1.0/storage-pools/POOL/buckets`API.
+
+## `resources_load`
+
+Add a new Load section to the resources API.
+
+## `instance_access`
+
+This introduces a new API endpoint at `GET /1.0/instances/NAME/access` which exposes who can interact with the instance and what role they have.
+
+## `project_access`
+
+This introduces a new API endpoint at `GET /1.0/projects/NAME/access` which exposes who can interact with the project and what role they have.
+
+## `projects_force_delete`
+
+This extends `DELETE /1.0/projects` to allow `?force=true` which will
+delete everything inside of the project along with the project itself.
+
+## `resources_cpu_flags`
+
+This exposes the CPU flags/extensions in our resources API to check the CPU features.
+
+## `disk_io_bus_cache_filesystem`
+
+This adds support for both `io.bus` and `io.cache` to disks that are backed by a file system.
+
+## `instance_oci`
+
+Adds initial support for running OCI containers.
+
+## `clustering_groups_config`
+
+This introduces a standard key/value `config` option to clustering
+groups which will allow placing some restrictions or configuration on
+those groups.
+
+## `instances_lxcfs_per_instance`
+
+This introduces a new `instances.lxcfs.per_instance` server
+configuration key to control whether to run LXCFS per instance instead
+of globally on the system.
+
+## `clustering_groups_vm_cpu_definition`
+
+This introduces a few new configuration options to control the virtual machine CPU definitions through cluster group configuration.
+
+The new configuration keys are:
+
+* `instances.vm.cpu.ARCHITECTURE.baseline`
+* `instances.vm.cpu.ARCHITECTURE.flag`
+
+## `disk_volume_subpath`
+
+This introduces the ability to access the sub-path of a file system custom volume by using the `source=volume/path` syntax.
+
+## `projects_limits_disk_pool`
+
+This introduces per-pool project disk limits, introducing a `limits.disk.pool.NAME` configuration option to the project limits.
+
+## `network_ovn_isolated`
+
+This allows using `none` as the uplink network for an OVN network, making the network isolated.
+
+## `qemu_raw_qmp`
+
+This adds new configuration options to virtual machines to directly issue QMP commands at various stages of startup:
+
+* `raw.qemu.qmp.early`
+* `raw.qemu.qmp.pre-start`
+* `raw.qemu.qmp.post-start`
+
+## `network_load_balancer_health_check`
+
+This adds the ability to perform health checks for load balancer backends.
+
+The following new configuration options are introduced:
+
+* `healthcheck`
+* `healthcheck.interval`
+* `healthcheck.timeout`
+* `healthcheck.failure_count`
+* `healthcheck.success_count`
+
+## `oidc_scopes`
+
+This introduces a new `oidc.scopes` server configuration key which can take a comma separate list of OIDC scopes to request from the identity provider.
+
+## `network_integrations_peer_name`
+
+This extends `ovn.transit.pattern` to allow `peerName` as a template variable.
+
+## `qemu_scriptlet`
+
+This adds the ability to run a scriptlet at various stages of startup: using the `raw.qemu.scriptlet` configuration key.
+
+## `instance_auto_restart`
+
+This introduces a new `boot.autorestart` configuration key which when
+set to `true` will have the instance automatically be restarted upon
+unexpected exit for up to 10 times over a 1 minute period.
+
+## `storage_lvm_metadatasize`
+
+This introduces a new `lvm.metadata_size` option for LVM storage pools
+which allows overriding the default metadata size when creating a new
+LVM physical volume.
+
+## `ovn_nic_promiscuous`
+
+This implements a new `security.promiscuous` configuration option on OVN NICs.
+
+## `ovn_nic_ip_address_none`
+
+This adds `none` as a value for `ipv4.address` and `ipv6.address` for OVN NICs.
+
+## `instances_state_os_info`
+
+This extension adds a pointer to an `InstanceStateOSInfo` struct to the instance's state API.
+
+## `network_load_balancer_state`
+
+This adds a new `/1.0/networks/NAME/load-balancers/IP/state` API endpoint
+which returns load-balancer health check information (when configured).
+
+## `instance_nic_macvlan_mode`
+
+This adds a `mode` configuration key on `macvlan` network interfaces which allows for configuring the Macvlan mode.
+
+## `storage_lvm_cluster_create`
+
+Allow for creating new LVM cluster pools by setting the `source` to the shared block device.
+
+## `network_ovn_external_interfaces`
+
+This adds support for `bridge.external_interfaces` on OVN networks.
+
+## `instances_scriptlet_get_instances_count`
+
+This allows the instance scriptlet to fetch the count instances given an optional Project or Location filter as well as including pending instances.
+
+## `cluster_rebalance`
+
+This adds automatic live-migration to balance load on cluster again.
+
+As part of this, the following configuration options have been added:
+
+* `cluster.rebalance.batch`
+* `cluster.rebalance.cooldown`
+* `cluster.rebalance.interval`
+* `cluster.rebalance.threshold`
+
+## `custom_volume_refresh_exclude_older_snapshots`
+
+This adds support for excluding source snapshots earlier than latest target snapshot.
+
+## `storage_initial_owner`
+
+This adds ability to set the initial owner of a custom volume.
+
+The following configuration options have been added:
+
+* `initial.gid`
+* `initial.mode`
+* `initial.uid`
+
+## `storage_live_migration`
+
+This adds support for virtual-machines live-migration between storage pools.
+
+## `instance_console_screenshot`
+
+This adds support to take screenshots of the current VGA console of a VM.
+
+## `image_import_alias`
+
+Adds a new `X-Incus-aliases` HTTP header to set aliases while uploading an image.
+
+## `authorization_scriptlet`
+
+This adds the ability to define a scriptlet in a new configuration key, `authorization.scriptlet`, managing authorization on the Incus cluster.
+
+## `console_force`
+
+This adds support for forcing a connection to the console, even if there is already an active session.
+It introduces the new `--force` flag for connecting to the instance console.
+
+## `network_ovn_state_addresses`
+
+This adds extra fields to the OVN network state struct for the IPv4 and IPv6 addresses used on the uplink.
+
+## `qemu_scriptlet_config`
+
+This extends the QEMU scriptlet feature by allowing to modify QEMU configuration before a VM starts, and passing information about the instance to the scriptlet.
+
+## `network_bridge_acl_devices`
+
+This adds support for device ACLs when attached to a bridged network.

@@ -10,35 +10,39 @@ Incus allows you to easily set up a system that feels like a small private cloud
 
 You should consider using Incus if you want to containerize different environments or run virtual machines, or in general run and manage your infrastructure in a cost-effective way.
 
+You can try Incus online at: [`https://linuxcontainers.org/incus/try-it/`](https://linuxcontainers.org/incus/try-it/)
 
 <!-- Include end Incus intro -->
 
-## Fork of Canonical LXD
-Incus, which is named after the [Cumulonimbus incus](https://en.wikipedia.org/wiki/Cumulonimbus_incus) or anvil cloud is a community fork of Canonical's LXD.
+## Project history
+Incus, which is named after the [Cumulonimbus incus](https://en.wikipedia.org/wiki/Cumulonimbus_incus) or anvil cloud
+started as community fork of Canonical's LXD following [Canonical's takeover](https://linuxcontainers.org/lxd/) of the LXD project from the
+Linux Containers community.
 
-This fork was made in response to [Canonical's takeover](https://linuxcontainers.org/lxd/) of the LXD project from the Linux Containers community.
+The project was then adopted by the Linux Containers community, taking back the spot left empty by LXD's departure.
 
-The main aim of this fork is to provide once again a real community project where everyone's contributions are welcome and no one single commercial entity is in charge of the project.
+Incus is a true open source community project, free of any [CLA](https://en.wikipedia.org/wiki/Contributor_License_Agreement) and
+remains released under the [Apache 2.0 license](https://www.apache.org/licenses/LICENSE-2.0).
+It's maintained by the same team of developers that first created LXD.
 
-The fork was done at the LXD 5.16 release, making it possible to upgrade from LXD releases up to and including LXD 5.16.
-Upgrading from a later LXD release may not work as the two projects are likely to start diverging from this point onwards.
-
-Incus will keep monitoring and importing relevant changes from LXD over time though changes and features that are specific to Ubuntu or Canonical's products are unlikely to be carried over.
+LXD users wishing to migrate to Incus can easily do so through a migration tool called [`lxd-to-incus`](https://linuxcontainers.org/incus/docs/main/howto/server_migrate_lxd/).
 
 ## Get started
 
-This is still the very early days of this fork. No packages or even releases currently exist.
-For production use, you are likely better off sticking with Canonical's LXD for the time being until stable release of Incus exist.
+See [Getting started](https://linuxcontainers.org/incus/docs/main/tutorial/first_steps/) in the Incus documentation for installation instructions and first steps.
 
+- Release announcements: [`https://discuss.linuxcontainers.org/c/news/`](https://discuss.linuxcontainers.org/c/news/)
+- Release tarballs: [`https://github.com/lxc/incus/releases/`](https://github.com/lxc/incus/releases/)
+- Documentation: [`https://linuxcontainers.org/incus/docs/main/`](https://linuxcontainers.org/incus/docs/main/)
 
 ## Status
 
 Type                | Service               | Status
 ---                 | ---                   | ---
-CI (client)         | GitHub                | [![Build Status](https://github.com/lxc/incus/workflows/Client%20build%20and%20unit%20tests/badge.svg)](https://github.com/lxc/incus/actions)
-CI (server)         | GitHub                | [![Build Status](https://github.com/lxc/incus/workflows/Tests/badge.svg)](https://github.com/lxc/incus/actions)
-Go documentation    | Godoc                 | [![GoDoc](https://godoc.org/github.com/lxc/incus/client?status.svg)](https://godoc.org/github.com/lxc/incus/client)
+Tests               | GitHub                | [![Build Status](https://github.com/lxc/incus/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/lxc/incus/actions?query=event%3Apush+branch%3Amain)
+Go documentation    | Godoc                 | [![GoDoc](https://godoc.org/github.com/lxc/incus/v6/client?status.svg)](https://godoc.org/github.com/lxc/incus/v6/client)
 Static analysis     | GoReport              | [![Go Report Card](https://goreportcard.com/badge/github.com/lxc/incus)](https://goreportcard.com/report/github.com/lxc/incus)
+Translations        | Weblate               | [![Translation status](https://hosted.weblate.org/widget/incus/svg-badge.svg)](https://hosted.weblate.org/projects/incus/)
 
 ## Security
 
@@ -71,6 +75,14 @@ The following channels are available for you to interact with the Incus communit
 ### Bug reports
 
 You can file bug reports and feature requests at: [`https://github.com/lxc/incus/issues/new`](https://github.com/lxc/incus/issues/new)
+
+### Community support
+
+Community support is handling at: [`https://discuss.linuxcontainers.org`](https://discuss.linuxcontainers.org)
+
+### Commercial support
+
+Commercial support is currently available from [Zabbly](https://zabbly.com) for users of their [Debian or Ubuntu packages](https://github.com/zabbly/incus).
 
 ## Documentation
 

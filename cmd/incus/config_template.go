@@ -9,10 +9,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/shared"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/termios"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/termios"
 )
 
 type cmdConfigTemplate struct {
@@ -66,17 +65,42 @@ func (c *cmdConfigTemplateCreate) Command() *cobra.Command {
 	cmd.Short = i18n.G("Create new instance file templates")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
 		`Create new instance file templates`))
+	cmd.Example = cli.FormatSection("", i18n.G(`incus config template create u1 t1
+
+incus config template create u1 t1 < config.tpl
+    Create template t1 for instance u1 from config.tpl`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
 
 func (c *cmdConfigTemplateCreate) Run(cmd *cobra.Command, args []string) error {
+	var stdinData io.ReadSeeker
+
 	// Quick checks.
 	exit, err := c.global.CheckArgs(cmd, args, 2, 2)
 	if exit {
 		return err
+	}
+
+	// If stdin isn't a terminal, read text from it
+	if !termios.IsTerminal(getStdinFd()) {
+		contents, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+
+		// Reset the seek position
+		stdinData = bytes.NewReader(contents)
 	}
 
 	// Parse remote
@@ -92,7 +116,7 @@ func (c *cmdConfigTemplateCreate) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create instance file template
-	return resource.server.CreateInstanceTemplateFile(resource.name, args[1], nil)
+	return resource.server.CreateInstanceTemplateFile(resource.name, args[1], stdinData)
 }
 
 // Delete.
@@ -111,6 +135,18 @@ func (c *cmdConfigTemplateDelete) Command() *cobra.Command {
 		`Delete instance file templates`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpInstanceConfigTemplates(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -154,6 +190,18 @@ func (c *cmdConfigTemplateEdit) Command() *cobra.Command {
 
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpInstanceConfigTemplates(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -192,7 +240,7 @@ func (c *cmdConfigTemplateEdit) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Spawn the editor
-	content, err = shared.TextEditor("", content)
+	content, err = textEditor("", content)
 	if err != nil {
 		return err
 	}
@@ -210,7 +258,7 @@ func (c *cmdConfigTemplateEdit) Run(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			content, err = shared.TextEditor("", content)
+			content, err = textEditor("", content)
 			if err != nil {
 				return err
 			}
@@ -239,9 +287,21 @@ func (c *cmdConfigTemplateList) Command() *cobra.Command {
 	cmd.Short = i18n.G("List instance file templates")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
 		`List instance file templates`))
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -283,7 +343,7 @@ func (c *cmdConfigTemplateList) Run(cmd *cobra.Command, args []string) error {
 		i18n.G("FILENAME"),
 	}
 
-	return cli.RenderTable(c.flagFormat, header, data, templates)
+	return cli.RenderTable(os.Stdout, c.flagFormat, header, data, templates)
 }
 
 // Show.
@@ -301,6 +361,18 @@ func (c *cmdConfigTemplateShow) Command() *cobra.Command {
 		`Show content of instance file templates`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpInstanceConfigTemplates(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }

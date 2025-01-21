@@ -13,12 +13,15 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/termios"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	internalUtil "github.com/lxc/incus/v6/internal/util"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/archive"
+	"github.com/lxc/incus/v6/shared/subprocess"
+	"github.com/lxc/incus/v6/shared/termios"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 type imageColumn struct {
@@ -158,6 +161,18 @@ It requires the source to be an alias and for it to be public.`))
 	cmd.Flags().StringArrayVarP(&c.flagProfile, "profile", "p", nil, i18n.G("Profile to apply to the new image")+"``")
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpImages(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpRemotes(toComplete, false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -185,16 +200,6 @@ func (c *cmdImageCopy) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Revert project for `sourceServer` which may have been overwritten
-	// by `--project` flag in `GetImageServer` method
-	remote := conf.Remotes[remoteName]
-	if remote.Protocol != "simplestream" && !remote.Public {
-		d, ok := sourceServer.(incus.InstanceServer)
-		if ok {
-			sourceServer = d.UseProject(remote.Project)
-		}
-	}
-
 	// Parse destination remote
 	resources, err := c.global.ParseServers(args[1])
 	if err != nil {
@@ -213,15 +218,18 @@ func (c *cmdImageCopy) Run(cmd *cobra.Command, args []string) error {
 		imageType = "virtual-machine"
 	}
 
+	// Set the correct project on target.
+	remote := conf.Remotes[resources[0].remote]
 	if c.flagTargetProject != "" {
 		destinationServer = destinationServer.UseProject(c.flagTargetProject)
+	} else if remote.Protocol == "incus" {
+		destinationServer = destinationServer.UseProject(remote.Project)
 	}
 
 	// Copy the image
 	var imgInfo *api.Image
-	var fp string
-	if conf.Remotes[remoteName].Protocol == "simplestreams" && !c.flagCopyAliases && len(c.flagAliases) == 0 {
-		// All simplestreams images are always public, so unless we
+	if conf.Remotes[remoteName].Protocol != "incus" && !c.flagCopyAliases && len(c.flagAliases) == 0 {
+		// All image servers outside of other Incus servers are always public, so unless we
 		// need the aliases list too or the real fingerprint, we can skip the otherwise very expensive
 		// alias resolution and image info retrieval step.
 		imgInfo = &api.Image{}
@@ -234,9 +242,6 @@ func (c *cmdImageCopy) Run(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-
-		// Store the fingerprint for use when creating aliases later (as imgInfo.Fingerprint may be overridden)
-		fp = imgInfo.Fingerprint
 	}
 
 	if imgInfo.Public && imgInfo.Fingerprint != name && !strings.HasPrefix(imgInfo.Fingerprint, name) {
@@ -244,12 +249,19 @@ func (c *cmdImageCopy) Run(cmd *cobra.Command, args []string) error {
 		imgInfo.Fingerprint = name
 	}
 
+	aliases := make([]api.ImageAlias, len(c.flagAliases))
+	for i, entry := range c.flagAliases {
+		aliases[i].Name = entry
+	}
+
 	copyArgs := incus.ImageCopyArgs{
-		AutoUpdate: c.flagAutoUpdate,
-		Public:     c.flagPublic,
-		Type:       imageType,
-		Mode:       c.flagMode,
-		Profiles:   c.flagProfile,
+		Aliases:     aliases,
+		AutoUpdate:  c.flagAutoUpdate,
+		CopyAliases: c.flagCopyAliases,
+		Public:      c.flagPublic,
+		Type:        imageType,
+		Mode:        c.flagMode,
+		Profiles:    c.flagProfile,
 	}
 
 	// Do the copy
@@ -279,22 +291,6 @@ func (c *cmdImageCopy) Run(cmd *cobra.Command, args []string) error {
 
 	progress.Done(i18n.G("Image copied successfully!"))
 
-	// Ensure aliases
-	aliases := make([]api.ImageAlias, len(c.flagAliases))
-	for i, entry := range c.flagAliases {
-		aliases[i].Name = entry
-	}
-
-	if c.flagCopyAliases {
-		// Also add the original aliases
-		aliases = append(aliases, imgInfo.Aliases...)
-	}
-
-	err = ensureImageAliases(destinationServer, aliases, fp)
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -313,6 +309,10 @@ func (c *cmdImageDelete) Command() *cobra.Command {
 		`Delete images`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return c.global.cmpImages(toComplete)
+	}
 
 	return cmd
 }
@@ -370,6 +370,14 @@ incus image edit <image> < image.yaml
     Load the image properties from a YAML file`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpImages(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -438,7 +446,7 @@ func (c *cmdImageEdit) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Spawn the editor
-	content, err := shared.TextEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
+	content, err := textEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
 	if err != nil {
 		return err
 	}
@@ -461,7 +469,7 @@ func (c *cmdImageEdit) Run(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			content, err = shared.TextEditor("", content)
+			content, err = textEditor("", content)
 			if err != nil {
 				return err
 			}
@@ -494,6 +502,14 @@ The output target is optional and defaults to the working directory.`))
 
 	cmd.Flags().BoolVar(&c.flagVM, "vm", false, i18n.G("Query virtual machine images"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpImages(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -529,7 +545,7 @@ func (c *cmdImageExport) Run(cmd *cobra.Command, args []string) error {
 	targetMeta := fingerprint
 	if len(args) > 1 {
 		target = args[1]
-		if shared.IsDir(args[1]) {
+		if internalUtil.IsDir(args[1]) {
 			targetMeta = filepath.Join(args[1], targetMeta)
 		} else {
 			targetMeta = args[1]
@@ -598,7 +614,7 @@ func (c *cmdImageExport) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Rename files
-	if shared.IsDir(target) {
+	if internalUtil.IsDir(target) {
 		if resp.MetaName != "" {
 			err := os.Rename(targetMeta, filepath.Join(target, resp.MetaName))
 			if err != nil {
@@ -640,6 +656,7 @@ type cmdImageImport struct {
 	image  *cmdImage
 
 	flagPublic  bool
+	flagReuse   bool
 	flagAliases []string
 }
 
@@ -653,8 +670,21 @@ func (c *cmdImageImport) Command() *cobra.Command {
 Directory import is only available on Linux and must be performed as root.`))
 
 	cmd.Flags().BoolVar(&c.flagPublic, "public", false, i18n.G("Make image public"))
+	cmd.Flags().BoolVar(&c.flagReuse, "reuse", false, i18n.G("If the image alias already exists, delete and create a new one"))
 	cmd.Flags().StringArrayVar(&c.flagAliases, "alias", nil, i18n.G("New aliases to add to the image")+"``")
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return nil, cobra.ShellCompDirectiveDefault
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpRemotes(toComplete, false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -675,7 +705,7 @@ func (c *cmdImageImport) packImageDir(path string) (string, error) {
 	defer func() { _ = outFile.Close() }()
 
 	outFileName := outFile.Name()
-	_, err = shared.RunCommand("tar", "-C", path, "--numeric-owner", "--restrict", "--force-local", "--xattrs", "-cJf", outFileName, "rootfs", "templates", "metadata.yaml")
+	_, err = subprocess.RunCommand("tar", "-C", path, "--numeric-owner", "--restrict", "--force-local", "--xattrs", "-cJf", outFileName, "rootfs", "templates", "metadata.yaml")
 	if err != nil {
 		return "", err
 	}
@@ -700,7 +730,7 @@ func (c *cmdImageImport) Run(cmd *cobra.Command, args []string) error {
 
 	for _, arg := range args {
 		split := strings.Split(arg, "=")
-		if len(split) == 1 || shared.PathExists(arg) {
+		if len(split) == 1 || util.PathExists(arg) {
 			if strings.HasSuffix(arg, ":") {
 				var err error
 				remote, _, err = conf.ParseRemote(arg)
@@ -727,11 +757,11 @@ func (c *cmdImageImport) Run(cmd *cobra.Command, args []string) error {
 		imageFile = args[0]
 	}
 
-	if shared.PathExists(filepath.Clean(imageFile)) {
+	if util.PathExists(filepath.Clean(imageFile)) {
 		imageFile = filepath.Clean(imageFile)
 	}
 
-	if rootfsFile != "" && shared.PathExists(filepath.Clean(rootfsFile)) {
+	if rootfsFile != "" && util.PathExists(filepath.Clean(rootfsFile)) {
 		rootfsFile = filepath.Clean(rootfsFile)
 	}
 
@@ -780,7 +810,7 @@ func (c *cmdImageImport) Run(cmd *cobra.Command, args []string) error {
 		var rootfs io.ReadCloser
 
 		// Open meta
-		if shared.IsDir(imageFile) {
+		if internalUtil.IsDir(imageFile) {
 			imageFile, err = c.packImageDir(imageFile)
 			if err != nil {
 				return err
@@ -805,7 +835,7 @@ func (c *cmdImageImport) Run(cmd *cobra.Command, args []string) error {
 
 			defer func() { _ = rootfs.Close() }()
 
-			_, ext, _, err := shared.DetectCompressionFile(rootfs)
+			_, ext, _, err := archive.DetectCompressionFile(rootfs)
 			if err != nil {
 				return err
 			}
@@ -852,13 +882,24 @@ func (c *cmdImageImport) Run(cmd *cobra.Command, args []string) error {
 	fingerprint := opAPI.Metadata["fingerprint"].(string)
 	progress.Done(fmt.Sprintf(i18n.G("Image imported with fingerprint: %s"), fingerprint))
 
+	// Reformat aliases
+	aliases := []api.ImageAlias{}
+	for _, entry := range c.flagAliases {
+		alias := api.ImageAlias{}
+		alias.Name = entry
+		aliases = append(aliases, alias)
+	}
+
+	// Delete images if necessary
+	if c.flagReuse {
+		err = deleteImagesByAliases(d, aliases)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Add the aliases
 	if len(c.flagAliases) > 0 {
-		aliases := make([]api.ImageAlias, len(c.flagAliases))
-		for i, entry := range c.flagAliases {
-			aliases[i].Name = entry
-		}
-
 		err = ensureImageAliases(d, aliases, fingerprint)
 		if err != nil {
 			return err
@@ -885,6 +926,14 @@ func (c *cmdImageInfo) Command() *cobra.Command {
 
 	cmd.Flags().BoolVar(&c.flagVM, "vm", false, i18n.G("Query virtual machine images"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpImages(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -946,21 +995,20 @@ func (c *cmdImageInfo) Run(cmd *cobra.Command, args []string) error {
 	fmt.Printf(i18n.G("Public: %s")+"\n", public)
 	fmt.Printf(i18n.G("Timestamps:") + "\n")
 
-	const layout = "2006/01/02 15:04 UTC"
-	if shared.TimeIsSet(info.CreatedAt) {
-		fmt.Printf("    "+i18n.G("Created: %s")+"\n", info.CreatedAt.UTC().Format(layout))
+	if !info.CreatedAt.IsZero() {
+		fmt.Printf("    "+i18n.G("Created: %s")+"\n", info.CreatedAt.Local().Format(dateLayout))
 	}
 
-	fmt.Printf("    "+i18n.G("Uploaded: %s")+"\n", info.UploadedAt.UTC().Format(layout))
+	fmt.Printf("    "+i18n.G("Uploaded: %s")+"\n", info.UploadedAt.Local().Format(dateLayout))
 
-	if shared.TimeIsSet(info.ExpiresAt) {
-		fmt.Printf("    "+i18n.G("Expires: %s")+"\n", info.ExpiresAt.UTC().Format(layout))
+	if !info.ExpiresAt.IsZero() {
+		fmt.Printf("    "+i18n.G("Expires: %s")+"\n", info.ExpiresAt.Local().Format(dateLayout))
 	} else {
 		fmt.Printf("    " + i18n.G("Expires: never") + "\n")
 	}
 
-	if shared.TimeIsSet(info.LastUsedAt) {
-		fmt.Printf("    "+i18n.G("Last used: %s")+"\n", info.LastUsedAt.UTC().Format(layout))
+	if !info.LastUsedAt.IsZero() {
+		fmt.Printf("    "+i18n.G("Last used: %s")+"\n", info.LastUsedAt.Local().Format(dateLayout))
 	} else {
 		fmt.Printf("    " + i18n.G("Last used: never") + "\n")
 	}
@@ -984,9 +1032,9 @@ func (c *cmdImageInfo) Run(cmd *cobra.Command, args []string) error {
 
 	if info.UpdateSource != nil {
 		fmt.Println(i18n.G("Source:"))
-		fmt.Printf("    Server: %s\n", info.UpdateSource.Server)
-		fmt.Printf("    Protocol: %s\n", info.UpdateSource.Protocol)
-		fmt.Printf("    Alias: %s\n", info.UpdateSource.Alias)
+		fmt.Printf("    "+i18n.G("Server: %s")+"\n", info.UpdateSource.Server)
+		fmt.Printf("    "+i18n.G("Protocol: %s")+"\n", info.UpdateSource.Protocol)
+		fmt.Printf("    "+i18n.G("Alias: %s")+"\n", info.UpdateSource.Alias)
 	}
 
 	if len(info.Profiles) == 0 {
@@ -1006,8 +1054,9 @@ type cmdImageList struct {
 	global *cmdGlobal
 	image  *cmdImage
 
-	flagFormat  string
-	flagColumns string
+	flagFormat      string
+	flagColumns     string
+	flagAllProjects bool
 }
 
 func (c *cmdImageList) Command() *cobra.Command {
@@ -1035,35 +1084,55 @@ Column shorthand chars:
     F - Fingerprint (long)
     p - Whether image is public
     d - Description
+    e - Project
     a - Architecture
     s - Size
     u - Upload date
     t - Type`))
 
-	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", "lfpdatsu", i18n.G("Columns")+"``")
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", defaultImagesColumns, i18n.G("Columns")+"``")
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
+	cmd.Flags().BoolVar(&c.flagAllProjects, "all-projects", false, i18n.G("Display images from all projects"))
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
+
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) != 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		return c.global.cmpImages(toComplete)
+	}
 
 	return cmd
 }
 
+const defaultImagesColumns = "lfpdatsu"
+const defaultImagesColumnsAllProjects = "elfpdatsu"
+
 func (c *cmdImageList) parseColumns() ([]imageColumn, error) {
 	columnsShorthandMap := map[rune]imageColumn{
-		'l': {i18n.G("ALIAS"), c.aliasColumnData},
-		'L': {i18n.G("ALIASES"), c.aliasesColumnData},
+		'a': {i18n.G("ARCHITECTURE"), c.architectureColumnData},
+		'd': {i18n.G("DESCRIPTION"), c.descriptionColumnData},
+		'e': {i18n.G("PROJECT"), c.projectColumnData},
 		'f': {i18n.G("FINGERPRINT"), c.fingerprintColumnData},
 		'F': {i18n.G("FINGERPRINT"), c.fingerprintFullColumnData},
+		'l': {i18n.G("ALIAS"), c.aliasColumnData},
+		'L': {i18n.G("ALIASES"), c.aliasesColumnData},
 		'p': {i18n.G("PUBLIC"), c.publicColumnData},
-		'd': {i18n.G("DESCRIPTION"), c.descriptionColumnData},
-		'a': {i18n.G("ARCHITECTURE"), c.architectureColumnData},
 		's': {i18n.G("SIZE"), c.sizeColumnData},
-		'u': {i18n.G("UPLOAD DATE"), c.uploadDateColumnData},
 		't': {i18n.G("TYPE"), c.typeColumnData},
+		'u': {i18n.G("UPLOAD DATE"), c.uploadDateColumnData},
 	}
 
 	columnList := strings.Split(c.flagColumns, ",")
 
 	columns := []imageColumn{}
+
 	for _, columnEntry := range columnList {
 		if columnEntry == "" {
 			return nil, fmt.Errorf(i18n.G("Empty column entry (redundant, leading or trailing command) in '%s'"), c.flagColumns)
@@ -1121,6 +1190,10 @@ func (c *cmdImageList) descriptionColumnData(image api.Image) string {
 	return c.findDescription(image.Properties)
 }
 
+func (c *cmdImageList) projectColumnData(image api.Image) string {
+	return image.Project
+}
+
 func (c *cmdImageList) architectureColumnData(image api.Image) string {
 	return image.Architecture
 }
@@ -1138,7 +1211,7 @@ func (c *cmdImageList) typeColumnData(image api.Image) string {
 }
 
 func (c *cmdImageList) uploadDateColumnData(image api.Image) string {
-	return image.UploadedAt.UTC().Format("Jan 2, 2006 at 3:04pm (MST)")
+	return image.UploadedAt.Local().Format(dateLayout)
 }
 
 func (c *cmdImageList) shortestAlias(list []api.ImageAlias) string {
@@ -1241,6 +1314,11 @@ func (c *cmdImageList) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Add project column if --all-projects flag specified and no -c was passed.
+	if c.flagAllProjects && c.flagColumns == defaultImagesColumns {
+		c.flagColumns = defaultImagesColumnsAllProjects
+	}
+
 	// Parse remote
 	remote := ""
 	if len(args) > 0 {
@@ -1275,15 +1353,22 @@ func (c *cmdImageList) Run(cmd *cobra.Command, args []string) error {
 
 	serverFilters, clientFilters := getServerSupportedFilters(filters, api.Image{})
 
-	var images []api.Image
-	allImages, err := remoteServer.GetImagesWithFilter(serverFilters)
-	if err != nil {
-		allImages, err = remoteServer.GetImages()
+	var allImages, images []api.Image
+	if c.flagAllProjects {
+		allImages, err = remoteServer.GetImagesAllProjects()
 		if err != nil {
 			return err
 		}
+	} else {
+		allImages, err = remoteServer.GetImagesWithFilter(serverFilters)
+		if err != nil {
+			allImages, err = remoteServer.GetImages()
+			if err != nil {
+				return err
+			}
 
-		clientFilters = filters
+			clientFilters = filters
+		}
 	}
 
 	for _, image := range allImages {
@@ -1321,7 +1406,7 @@ func (c *cmdImageList) Run(cmd *cobra.Command, args []string) error {
 		headers = append(headers, column.Name)
 	}
 
-	return cli.RenderTable(c.flagFormat, headers, data, rawData)
+	return cli.RenderTable(os.Stdout, c.flagFormat, headers, data, rawData)
 }
 
 // Refresh.
@@ -1338,6 +1423,10 @@ func (c *cmdImageRefresh) Command() *cobra.Command {
 		`Refresh images`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return c.global.cmpImages(toComplete)
+	}
 
 	return cmd
 }
@@ -1420,6 +1509,14 @@ func (c *cmdImageShow) Command() *cobra.Command {
 	cmd.Flags().BoolVar(&c.flagVM, "vm", false, i18n.G("Query virtual machine images"))
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpImages(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -1478,6 +1575,19 @@ func (c *cmdImageGetProp) Command() *cobra.Command {
 
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpImages(toComplete)
+		}
+
+		if len(args) == 1 {
+			// individual image prop could complete here
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -1529,6 +1639,14 @@ func (c *cmdImageSetProp) Command() *cobra.Command {
 		`Set image properties`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpImages(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -1585,6 +1703,14 @@ func (c *cmdImageUnsetProp) Command() *cobra.Command {
 		`Unset image properties`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpImages(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }

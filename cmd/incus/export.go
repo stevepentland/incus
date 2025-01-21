@@ -10,11 +10,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/archive"
 )
 
 type cmdExport struct {
@@ -77,7 +77,7 @@ func (c *cmdExport) Run(cmd *cobra.Command, args []string) error {
 
 	op, err := d.CreateInstanceBackup(name, req)
 	if err != nil {
-		return fmt.Errorf("Create instance backup: %w", err)
+		return fmt.Errorf(i18n.G("Create instance backup: %w"), err)
 	}
 
 	// Watch the background operation
@@ -110,12 +110,12 @@ func (c *cmdExport) Run(cmd *cobra.Command, args []string) error {
 	uStr := op.Get().Resources["backups"][0]
 	u, err := url.Parse(uStr)
 	if err != nil {
-		return fmt.Errorf("Invalid URL %q: %w", uStr, err)
+		return fmt.Errorf(i18n.G("Invalid URL %q: %w"), uStr, err)
 	}
 
 	backupName, err := url.PathUnescape(path.Base(u.EscapedPath()))
 	if err != nil {
-		return fmt.Errorf("Invalid backup name segment in path %q: %w", u.EscapedPath(), err)
+		return fmt.Errorf(i18n.G("Invalid backup name segment in path %q: %w"), u.EscapedPath(), err)
 	}
 
 	defer func() {
@@ -162,7 +162,7 @@ func (c *cmdExport) Run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		_ = os.Remove(targetName)
 		progress.Done("")
-		return fmt.Errorf("Fetch instance backup file: %w", err)
+		return fmt.Errorf(i18n.G("Fetch instance backup file: %w"), err)
 	}
 
 	// Detect backup file type and rename file accordingly
@@ -172,20 +172,20 @@ func (c *cmdExport) Run(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
-		_, ext, _, err := shared.DetectCompressionFile(target)
+		_, ext, _, err := archive.DetectCompressionFile(target)
 		if err != nil {
 			return err
 		}
 
 		err = os.Rename(targetName, name+ext)
 		if err != nil {
-			return fmt.Errorf("Failed to rename export file: %w", err)
+			return fmt.Errorf(i18n.G("Failed to rename export file: %w"), err)
 		}
 	}
 
 	err = target.Close()
 	if err != nil {
-		return fmt.Errorf("Failed to close export file: %w", err)
+		return fmt.Errorf(i18n.G("Failed to close export file: %w"), err)
 	}
 
 	progress.Done(i18n.G("Backup exported successfully!"))

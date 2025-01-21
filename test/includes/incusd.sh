@@ -47,7 +47,7 @@ spawn_incus() {
     echo "==> Spawned Incus (PID is ${INCUS_PID})"
 
     echo "==> Confirming incusd is responsive (PID is ${INCUS_PID})"
-    INCUS_DIR="${incusdir}" incusd waitready --timeout=300 || (echo "Killing PID ${INCUS_PID}" ; kill -9 "${INCUS_PID}" ; false)
+    INCUS_DIR="${incusdir}" incus admin waitready --timeout=300 || (echo "Killing PID ${INCUS_PID}" ; kill -9 "${INCUS_PID}" ; false)
 
     if [ "${INCUS_NETNS}" = "" ]; then
         echo "==> Binding to network"
@@ -60,8 +60,6 @@ spawn_incus() {
         done
     fi
 
-    echo "==> Setting trust password"
-    INCUS_DIR="${incusdir}" incus config set core.trust_password foo
     if [ -n "${DEBUG:-}" ]; then
         set -x
     fi
@@ -105,7 +103,7 @@ respawn_incus() {
 
     if [ "${wait}" = true ]; then
         echo "==> Confirming incusd is responsive (PID is ${INCUS_PID})"
-        INCUS_DIR="${incusdir}" incusd waitready --timeout=300 || (echo "Killing PID ${INCUS_PID}" ; kill -9 "${INCUS_PID}" ; false)
+        INCUS_DIR="${incusdir}" incus admin waitready --timeout=300 || (echo "Killing PID ${INCUS_PID}" ; kill -9 "${INCUS_PID}" ; false)
     fi
 
     if [ -n "${DEBUG:-}" ]; then
@@ -187,7 +185,7 @@ kill_incus() {
         done
 
         # Kill the daemon
-        timeout -k 30 30 incusd shutdown || kill -9 "${daemon_pid}" 2>/dev/null || true
+        timeout -k 30 30 incus admin shutdown || kill -9 "${daemon_pid}" 2>/dev/null || true
 
         sleep 2
 
@@ -225,7 +223,7 @@ kill_incus() {
         check_empty "${daemon_dir}/security/apparmor/profiles/"
         check_empty "${daemon_dir}/security/seccomp/"
         check_empty "${daemon_dir}/shmounts/"
-        check_empty "${daemon_dir}/snapshots/"
+        check_empty "${daemon_dir}/containers-snapshots/"
 
         echo "==> Checking for leftover DB entries"
         check_empty_table "${daemon_dir}/database/global/db.bin" "instances"
@@ -275,7 +273,7 @@ shutdown_incus() {
     echo "==> Shutting down Incus at ${daemon_dir} (${daemon_pid})"
 
     # Shutting down the daemon
-    incusd shutdown || kill -9 "${daemon_pid}" 2>/dev/null || true
+    incus admin shutdown || kill -9 "${daemon_pid}" 2>/dev/null || true
 
     # Wait for any cleanup activity that might be happening right
     # after the websocket is closed.

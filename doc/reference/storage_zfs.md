@@ -1,12 +1,5 @@
----
-discourse: 15872
----
-
 (storage-zfs)=
 # ZFS - `zfs`
-
-```{youtube} https://www.youtube.com/watch?v=ysLi_LYAs_M
-```
 
 {abbr}`ZFS (Zettabyte file system)` combines both physical volume management and a file system.
 A ZFS installation can span across a series of storage devices and is very scalable, allowing you to add disks to expand the available space in the storage pool immediately.
@@ -31,21 +24,21 @@ These {spellexception}`datasets` can be of different types:
   ZFS snapshots are read-only.
 - A *ZFS clone* is a writable copy of a ZFS snapshot.
 
-## `zfs` driver in LXD
+## `zfs` driver in Incus
 
-The `zfs` driver in LXD uses {spellexception}`ZFS filesystems` and ZFS volumes for images and custom storage volumes, and ZFS snapshots and clones to create instances from images and for instance and custom volume snapshots.
-By default, LXD enables compression when creating a ZFS pool.
+The `zfs` driver in Incus uses {spellexception}`ZFS filesystems` and ZFS volumes for images and custom storage volumes, and ZFS snapshots and clones to create instances from images and for instance and custom volume snapshots.
+By default, Incus enables compression when creating a ZFS pool.
 
-LXD assumes that it has full control over the ZFS pool and {spellexception}`dataset`.
-Therefore, you should never maintain any {spellexception}`datasets` or file system entities that are not owned by LXD in a ZFS pool or {spellexception}`dataset`, because LXD might delete them.
+Incus assumes that it has full control over the ZFS pool and {spellexception}`dataset`.
+Therefore, you should never maintain any {spellexception}`datasets` or file system entities that are not owned by Incus in a ZFS pool or {spellexception}`dataset`, because Incus might delete them.
 
 Due to the way copy-on-write works in ZFS, parent {spellexception}`ZFS filesystems` can't be removed until all children are gone.
-As a result, LXD automatically renames any objects that are removed but still referenced.
+As a result, Incus automatically renames any objects that are removed but still referenced.
 Such objects are kept at a random `deleted/` path until all references are gone and the object can safely be removed.
 Note that this method might have ramifications for restoring snapshots.
 See {ref}`storage-zfs-limitations` below.
 
-LXD automatically enables trimming support on all newly created pools on ZFS 0.8 or later.
+Incus automatically enables trimming support on all newly created pools on ZFS 0.8 or later.
 This increases the lifetime of SSDs by allowing better block re-use by the controller, and it also allows to free space on the root file system when using a loop-backed ZFS pool.
 If you are running a ZFS version earlier than 0.8 and want to enable trimming, upgrade to at least version 0.8.
 Then use the following commands to make sure that trimming is automatically enabled for the ZFS pool in the future and trim all currently unused space:
@@ -59,17 +52,13 @@ Then use the following commands to make sure that trimming is automatically enab
 
 The `zfs` driver has the following limitations:
 
-Delegating part of a pool
-: ZFS doesn't support delegating part of a pool to a container user.
-  Upstream is actively working on providing this functionality.
-
 Restoring from older snapshots
 : ZFS doesn't support restoring from snapshots other than the latest one.
   You can, however, create new instances from older snapshots.
   This method makes it possible to confirm whether a specific snapshot contains what you need.
   After determining the correct snapshot, you can {ref}`remove the newer snapshots <storage-edit-snapshots>` so that the snapshot you need is the latest one and you can restore it.
 
-  Alternatively, you can configure LXD to automatically discard the newer snapshots during restore.
+  Alternatively, you can configure Incus to automatically discard the newer snapshots during restore.
   To do so, set the [`zfs.remove_snapshots`](storage-zfs-vol-config) configuration for the volume (or the corresponding `volume.zfs.remove_snapshots` configuration on the storage pool for all volumes in the pool).
 
   Note, however, that if [`zfs.clone_copy`](storage-zfs-pool-config) is set to `true`, instance copies use ZFS snapshots too.
@@ -81,13 +70,16 @@ Observing I/O quotas
 : I/O quotas are unlikely to affect {spellexception}`ZFS filesystems` very much.
   That's because ZFS is a port of a Solaris module (using SPL) and not a native Linux file system using the Linux VFS API, which is where I/O limits are applied.
 
+Feature support in ZFS
+: Some features, like the use of idmaps or delegation of a ZFS dataset, require ZFS 2.2 or higher and are therefore not widely available yet.
+
 ### Quotas
 
 ZFS provides two different quota properties: `quota` and `refquota`.
 `quota` restricts the total size of a {spellexception}`dataset`, including its snapshots and clones.
 `refquota` restricts only the size of the data in the {spellexception}`dataset`, not its snapshots and clones.
 
-By default, LXD uses the `quota` property when you set up a quota for your storage volume.
+By default, Incus uses the `quota` property when you set up a quota for your storage volume.
 If you want to use the `refquota` property instead, set the [`zfs.use_refquota`](storage-zfs-vol-config) configuration for the volume (or the corresponding `volume.zfs.use_refquota` configuration on the storage pool for all volumes in the pool).
 
 You can also set the [`zfs.use_reserve_space`](storage-zfs-vol-config) (or `volume.zfs.use_reserve_space`) configuration to use ZFS `reservation` or `refreservation` along with `quota` or `refquota`.
@@ -102,7 +94,7 @@ The following configuration options are available for storage pools that use the
 Key                           | Type                          | Default                                 | Description
 :--                           | :---                          | :------                                 | :----------
 `size`                        | string                        | auto (20% of free disk space, >= 5 GiB and <= 30 GiB) | Size of the storage pool when creating loop-based pools (in bytes, suffixes supported, can be increased to grow storage pool)
-`source`                      | string                        | -                                       | Path to an existing block device, loop file or ZFS dataset/pool
+`source`                      | string                        | -                                       | Path to existing block device(s), loop file or ZFS dataset/pool. Multiple block devices should be separated by `,`. When listing block devices, you can also prefix them with `vdev` type. To specify a `vdev` type, use an `=` sign between the `vdev` type and the block devices (e.g., `mirror=/dev/sda,/dev/sdb`). Only `stripe`, `mirror`, `raidz1` and `raidz2` `vdev` types are supported.
 `source.wipe`                 | bool                          | `false`                                 | Wipe the block device specified in `source` prior to creating the storage pool
 `zfs.clone_copy`              | string                        | `true`                                  | Whether to use ZFS lightweight clones rather than full {spellexception}`dataset` copies (Boolean), or `rebase` to copy based on the initial image
 `zfs.export`                  | bool                          | `true`                                  | Disable zpool export while unmount performed
@@ -115,16 +107,21 @@ Key                           | Type                          | Default         
 
 Key                     | Type      | Condition                 | Default                                        | Description
 :--                     | :---      | :--------                 | :------                                        | :----------
-`block.filesystem`      | string    | `zfs.block_mode` enabled  | same as `volume.block.filesystem`              | {{block_filesystem}}
-`block.mount_options`   | string    | `zfs.block_mode` enabled  | same as `volume.block.mount_options`           | Mount options for block-backed file system volumes
+`block.filesystem`      | string    | block-based volume with content type `filesystem` (`zfs.block_mode` enabled) | same as `volume.block.filesystem`              | {{block_filesystem}}
+`block.mount_options`   | string    | block-based volume with content type `filesystem` (`zfs.block_mode` enabled) | same as `volume.block.mount_options`           | Mount options for block-backed file system volumes
+`initial.gid`           | int       | custom volume with content type `filesystem`  | same as `volume.initial.uid` or `0`           | GID of the volume owner in the instance
+`initial.mode`          | int       | custom volume with content type `filesystem`  | same as `volume.initial.mode` or `711`        | Mode  of the volume in the instance
+`initial.uid`           | int       | custom volume with content type `filesystem`  | same as `volume.initial.gid` or `0`           | UID of the volume owner in the instance
+`security.shared`       | bool      | custom block volume       | same as `volume.security.shared` or `false`    | Enable sharing the volume across multiple instances
 `security.shifted`      | bool      | custom volume             | same as `volume.security.shifted` or `false`   | {{enable_ID_shifting}}
 `security.unmapped`     | bool      | custom volume             | same as `volume.security.unmapped` or `false`  | Disable ID mapping for the volume
 `size`                  | string    |                           | same as `volume.size`                          | Size/quota of the storage volume
 `snapshots.expiry`      | string    | custom volume             | same as `volume.snapshots.expiry`              | {{snapshot_expiry_format}}
 `snapshots.pattern`     | string    | custom volume             | same as `volume.snapshots.pattern` or `snap%d` | {{snapshot_pattern_format}} [^*]
 `snapshots.schedule`    | string    | custom volume             | same as `snapshots.schedule`                   | {{snapshot_schedule_format}}
-`zfs.blocksize`         | string    |                           | same as `volume.zfs.blocksize`                 | Size of the ZFS block in range from 512 to 16 MiB (must be power of 2) - for block volume, a maximum value of 128 KiB will be used even if a higher value is set
+`zfs.blocksize`         | string    |                           | same as `volume.zfs.blocksize`                 | Size of the ZFS block in range from 512 bytes to 16 MiB (must be power of 2) - for block volume, a maximum value of 128 KiB will be used even if a higher value is set
 `zfs.block_mode`        | bool      |                           | same as `volume.zfs.block_mode`                | Whether to use a formatted `zvol` rather than a {spellexception}`dataset` (`zfs.block_mode` can be set only for custom storage volumes; use `volume.zfs.block_mode` to enable ZFS block mode for all storage volumes in the pool, including instance volumes)
+`zfs.delegate`          | bool      | ZFS 2.2 or higher         | same as `volume.zfs.delegate`                  | Controls whether to delegate the ZFS dataset and anything underneath it to the container(s) using it. Allows the use of the `zfs` command in the container.
 `zfs.remove_snapshots`  | bool      |                           | same as `volume.zfs.remove_snapshots` or `false` | Remove snapshots as needed
 `zfs.use_refquota`      | bool      |                           | same as `volume.zfs.use_refquota` or `false`   | Use `refquota` instead of `quota` for space
 `zfs.reserve_space`     | bool      |                           | same as `volume.zfs.reserve_space` or `false`  | Use `reservation`/`refreservation` along with `quota`/`refquota`
@@ -133,7 +130,7 @@ Key                     | Type      | Condition                 | Default       
 
 ### Storage bucket configuration
 
-To enable storage buckets for local storage pool drivers and allow applications to access the buckets via the S3 protocol, you must configure the [`core.storage_buckets_address`](server-options-core) server setting.
+To enable storage buckets for local storage pool drivers and allow applications to access the buckets via the S3 protocol, you must configure the {config:option}`server-core:core.storage_buckets_address` server setting.
 
 Key                     | Type      | Condition                 | Default                                        | Description
 :--                     | :---      | :--------                 | :------                                        | :----------

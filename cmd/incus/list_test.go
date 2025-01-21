@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
+	"github.com/lxc/incus/v6/internal/instance"
+	"github.com/lxc/incus/v6/shared/api"
 )
 
 func TestDotPrefixMatch(t *testing.T) {
@@ -153,26 +153,26 @@ func TestShouldShow(t *testing.T) {
 }
 
 // Used by TestColumns and TestInvalidColumns.
-const shorthand = "46abcdDefFlmMnNpPsStuL"
+const shorthand = "46abcdDefFlmMnNpPsStuUL"
 const alphanum = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 func TestColumns(t *testing.T) {
-	keys := make([]string, 0, len(shared.InstanceConfigKeysAny)+len(shared.InstanceConfigKeysContainer)+len(shared.InstanceConfigKeysVM))
-	for k := range shared.InstanceConfigKeysAny {
+	keys := make([]string, 0, len(instance.InstanceConfigKeysAny)+len(instance.InstanceConfigKeysContainer)+len(instance.InstanceConfigKeysVM))
+	for k := range instance.InstanceConfigKeysAny {
 		keys = append(keys, k)
 
 		// Test compatibility with 'config:' prefix.
 		keys = append(keys, "config:"+k)
 	}
 
-	for k := range shared.InstanceConfigKeysContainer {
+	for k := range instance.InstanceConfigKeysContainer {
 		keys = append(keys, k)
 
 		// Test compatibility with 'config:' prefix.
 		keys = append(keys, "config:"+k)
 	}
 
-	for k := range shared.InstanceConfigKeysVM {
+	for k := range instance.InstanceConfigKeysVM {
 		keys = append(keys, k)
 
 		// Test compatibility with 'config:' prefix.
@@ -215,11 +215,11 @@ func TestColumns(t *testing.T) {
 			randString(buffer)
 		case 3:
 			if rand.Intn(2) == 0 {
-				buffer.WriteString(shared.ConfigVolatilePrefix)
+				buffer.WriteString(instance.ConfigVolatilePrefix)
 				randString(buffer)
 				buffer.WriteString(".hwaddr")
 			} else {
-				buffer.WriteString(shared.ConfigVolatilePrefix)
+				buffer.WriteString(instance.ConfigVolatilePrefix)
 				randString(buffer)
 				buffer.WriteString(".name")
 			}
@@ -279,7 +279,7 @@ func TestColumns(t *testing.T) {
 			}
 
 			// Generate the column string, removing any leading, trailing or duplicate commas.
-			raw := shared.RemoveDuplicatesFromString(strings.Trim(buffer.String(), ","), ",")
+			raw := removeDuplicatesFromString(strings.Trim(buffer.String(), ","), ",")
 
 			list := cmdList{flagColumns: raw}
 
@@ -294,6 +294,15 @@ func TestColumns(t *testing.T) {
 			}
 		}()
 	}
+}
+
+func removeDuplicatesFromString(s string, sep string) string {
+	dup := sep + sep
+	for s = strings.Replace(s, dup, sep, -1); strings.Contains(s, dup); s = strings.Replace(s, dup, sep, -1) {
+
+	}
+
+	return s
 }
 
 func TestInvalidColumns(t *testing.T) {

@@ -1,13 +1,9 @@
 ---
-discourse: 12559
 relatedlinks: https://cloudinit.readthedocs.org/
 ---
 
 (cloud-init)=
 # How to use `cloud-init`
-
-```{youtube} https://www.youtube.com/watch?v=8OCG15TAldI
-```
 
 [`cloud-init`](https://cloud-init.io/) is a tool for automatically initializing and customizing an instance of a Linux distribution.
 
@@ -30,22 +26,30 @@ Rebooting the instance does not re-trigger the actions.
 
 ## `cloud-init` support in images
 
-To use `cloud-init`, you must base your instance on an image that has `cloud-init` installed:
+To use `cloud-init`, you must base your instance on an image that has `cloud-init` installed.
 
-* All images from the `ubuntu` and `ubuntu-daily` {ref}`image servers <remote-image-servers>` have `cloud-init` support.
-* Images from the [`images` remote](https://images.linuxcontainers.org/) have `cloud-init`-enabled variants, which are usually bigger in size than the default variant.
-  The cloud variants use the `/cloud` suffix, for example, `images:ubuntu/22.04/cloud`.
+Images from the [`images` remote](https://images.linuxcontainers.org/) have `cloud-init`-enabled variants, which are usually bigger in size than the default variant.
+The cloud variants use the `/cloud` suffix, for example, `images:ubuntu/22.04/cloud`.
+
+## `cloud-init` and virtual machines
+
+For `cloud-init` to work inside of a virtual machine, you need to either have a functional `incus-agent` in the VM or need to provide the `cloud-init` data through a special extra disk.
+All images coming from the `images:` remote will have the agent already setup and so are good to go from the start.
+
+For instances that do not have the `incus-agent`, you can pass in the extra `cloud-init` disk with:
+
+    incus config device add INSTANCE cloud-init disk source=cloud-init:config
 
 ## Configuration options
 
-LXD supports two different sets of configuration options for configuring `cloud-init`: `cloud-init.*` and `user.*`.
+Incus supports two different sets of configuration options for configuring `cloud-init`: `cloud-init.*` and `user.*`.
 Which of these sets you must use depends on the `cloud-init` support in the image that you use.
 As a rule of thumb, newer images support the `cloud-init.*` configuration options, while older images support `user.*`.
 However, there might be exceptions to that rule.
 
 The following configuration options are supported:
 
-* `cloud-init.vendor-data` or `user.vendor-data` (see {ref}`cloud-init:vendordata`)
+* `cloud-init.vendor-data` or `user.vendor-data` (see {ref}`cloud-init:vendor-data`)
 * `cloud-init.user-data` or `user.user-data` (see {ref}`cloud-init:user_data_formats`)
 * `cloud-init.network-config` or `user.network-config` (see {ref}`cloud-init:network_config`)
 
@@ -57,7 +61,7 @@ Both `vendor-data` and `user-data` are used to provide {ref}`cloud configuration
 
 The main idea is that `vendor-data` is used for the general default configuration, while `user-data` is used for instance-specific configuration.
 This means that you should specify `vendor-data` in a profile and `user-data` in the instance configuration.
-LXD does not enforce this method, but allows using both `vendor-data` and `user-data` in profiles and in the instance configuration.
+Incus does not enforce this method, but allows using both `vendor-data` and `user-data` in profiles and in the instance configuration.
 
 If both `vendor-data` and `user-data` are supplied for an instance, `cloud-init` merges the two configurations.
 However, if you use the same keys in both configurations, merging might not be possible.
@@ -70,7 +74,7 @@ To configure `cloud-init` for an instance, add the corresponding configuration o
 
 When configuring `cloud-init` directly for an instance, keep in mind that `cloud-init` runs only on the first start of the instance.
 That means that you must configure `cloud-init` before you start the instance.
-To do so, create the instance with `lxc init` instead of `lxc launch`, and then start it after completing the configuration.
+To do so, create the instance with [`incus init`](incus_create.md) instead of [`incus launch`](incus_launch.md), and then start it after completing the configuration.
 
 ### YAML format for `cloud-init` configuration
 
@@ -92,7 +96,7 @@ config:
 ```
 
 ```{tip}
-See {doc}`cloud-init:howto/debug_user_data` for information on how to check whether the syntax is correct.
+See {ref}`How to validate user data <cloud-init:check_user_data_cloud_config>` for information on how to check whether the syntax is correct.
 ```
 
 ## How to check the `cloud-init` status
@@ -184,14 +188,14 @@ config:
 
 #### Add a user account
 
-To add a user account, use the `user` key.
+To add a user account, use the `users` key.
 See the {ref}`cloud-init:reference/examples:including users and groups` example in the `cloud-init` documentation for details about default users and which keys are supported.
 
 ```yaml
 config:
   cloud-init.user-data: |
     #cloud-config
-    user:
+    users:
       - name: documentation_example
 ```
 
@@ -215,17 +219,13 @@ To configure a specific network interface with a static IPv4 address and also us
 ```yaml
 config:
   cloud-init.network-config: |
-    version: 1
-    config:
-      - type: physical
-        name: eth1
-        subnets:
-          - type: static
-            ipv4: true
-            address: 10.10.101.20
-            netmask: 255.255.255.0
-            gateway: 10.10.101.1
-            control: auto
-      - type: nameserver
-        address: 10.10.10.254
+    version: 2
+    ethernets:
+      eth1:
+        addresses:
+          - 10.10.101.20/24
+        gateway4: 10.10.101.1
+        nameservers:
+          addresses:
+            - 10.10.10.254
 ```

@@ -69,14 +69,14 @@ testloopmounts() {
   umount -l "${TEST_DIR}/mnt"
   incus start foo
   incus config device add foo mnt disk source="${lpath}" path=/mnt
-  incus exec foo stat /mnt/hello
+  incus exec foo -- stat /mnt/hello
   # Note - we need to add a set_running_config_item to lxc
   # or work around its absence somehow.  Once that's done, we
   # can run the following two lines:
-  #incus exec foo reboot
-  #incus exec foo stat /mnt/hello
+  #incus exec foo -- reboot
+  #incus exec foo -- stat /mnt/hello
   incus restart foo --force
-  incus exec foo stat /mnt/hello
+  incus exec foo -- stat /mnt/hello
   incus config device remove foo mnt
   ensure_fs_unmounted "fs should have been hot-unmounted"
   incus restart foo --force
@@ -148,6 +148,11 @@ test_config_profiles() {
   incus profile remove foo one
   [ "$(incus list -f json foo | jq -r '.[0].profiles | join(" ")')" = "" ]
 
+  # check that we can create a profile with a description
+  incus profile create foo --description bar
+  incus profile ls | grep -q bar
+  incus profile delete foo
+
   incus profile create stdintest
   echo "BADCONF" | incus profile set stdintest user.user_data -
   incus profile show stdintest | grep BADCONF
@@ -164,16 +169,7 @@ test_config_profiles() {
   incus profile assign foo onenic
   incus profile create unconfined
 
-  # Look at the LXC version to decide whether to use the new
-  # or the new config key for apparmor.
-  lxc_version=$(lxc info | awk '/driver_version:/ {print $NF}')
-  lxc_major=$(echo "${lxc_version}" | cut -d. -f1)
-  lxc_minor=$(echo "${lxc_version}" | cut -d. -f2)
-  if [ "${lxc_major}" -lt 2 ] || { [ "${lxc_major}" = "2" ] && [ "${lxc_minor}" -lt "1" ]; }; then
-      incus profile set unconfined raw.lxc "lxc.aa_profile=unconfined"
-  else
-      incus profile set unconfined raw.lxc "lxc.apparmor.profile=unconfined"
-  fi
+  incus profile set unconfined raw.lxc "lxc.apparmor.profile=unconfined"
 
   incus profile assign foo onenic,unconfined
 
@@ -242,6 +238,18 @@ test_config_profiles() {
     false
   fi
 
+  # Test unsetting config keys
+  incus config set core.metrics_authentication false
+  [ "$(incus config get core.metrics_authentication)" = "false" ]
+
+  incus config unset core.metrics_authentication
+  [ -z "$(incus config get core.metrics_authentication)" ]
+
+  # Validate user.* keys
+  ! incus config set user.⍾ foo || false
+  incus config set user.foo bar
+  incus config unset user.foo
+
   testunixdevs
 
   testloopmounts
@@ -266,7 +274,7 @@ test_config_profiles() {
 
 test_config_edit() {
     if ! tty -s; then
-        echo "==> SKIP: Test requires a terminal"
+        echo "==> SKIP: test_config_edit requires a terminal"
         return
     fi
 
@@ -314,11 +322,11 @@ test_property() {
 
   # Create a snap of the instance to set its expiration timestamp
   incus snapshot create foo s1
-  incus config set foo/s1 expires_at="2024-03-23T17:38:37.753398689-04:00" --property
-  incus config show foo/s1 | grep -q "expires_at: 2024-03-23T17:38:37.753398689-04:00"
+  incus config set foo/s1 expires_at="2050-01-01T10:10:10.753398689-04:00" --property
+  incus config get foo/s1 expires_at --property | grep -q "2050-01-01 10:10:10.753398689 -0400 -0400"
+  incus config show foo/s1 | grep -q "expires_at: 2050-01-01T10:10:10.753398689-04:00"
   incus config unset foo/s1 expires_at --property
   incus config show foo/s1 | grep -q "expires_at: 0001-01-01T00:00:00Z"
-
 
   # Create a storage volume, create a volume snapshot and set its expiration timestamp
   # shellcheck disable=2039,3043
@@ -397,7 +405,7 @@ test_container_metadata() {
 
 test_container_snapshot_config() {
     if ! tty -s; then
-        echo "==> SKIP: Test requires a terminal"
+        echo "==> SKIP: test_container_snapshot_config requires a terminal"
         return
     fi
 

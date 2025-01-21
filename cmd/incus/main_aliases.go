@@ -4,16 +4,16 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
-	"path"
-	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
-	config "github.com/lxc/incus/internal/cliconfig"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/i18n"
+	"github.com/kballard/go-shellquote"
+	"github.com/spf13/cobra"
+
+	"github.com/lxc/incus/v6/internal/i18n"
+	config "github.com/lxc/incus/v6/shared/cliconfig"
 )
 
 var numberedArgRegex = regexp.MustCompile(`@ARG(\d+)@`)
@@ -29,7 +29,29 @@ func findAlias(aliases map[string]string, origArgs []string) ([]string, []string
 	aliasKey := []string{}
 	aliasValue := []string{}
 
-	for k, v := range aliases {
+	// Sort the aliases in a stable order, preferring the long multi-fields ones.
+	aliasNames := make([]string, 0, len(aliases))
+	for k := range aliases {
+		aliasNames = append(aliasNames, k)
+	}
+
+	slices.Sort(aliasNames)
+	slices.SortStableFunc(aliasNames, func(a, b string) int {
+		aFields := strings.Split(a, " ")
+		bFields := strings.Split(b, " ")
+
+		if len(aFields) == len(bFields) {
+			return 0
+		} else if len(aFields) < len(bFields) {
+			return 1
+		}
+
+		return -1
+	})
+
+	for _, k := range aliasNames {
+		v := aliases[k]
+
 		foundAlias = true
 		for i, key := range strings.Split(k, " ") {
 			if len(origArgs) <= i+1 || origArgs[i+1] != key {
@@ -40,7 +62,14 @@ func findAlias(aliases map[string]string, origArgs []string) ([]string, []string
 
 		if foundAlias {
 			aliasKey = strings.Split(k, " ")
-			aliasValue = strings.Split(v, " ")
+
+			fields, err := shellquote.Split(v)
+			if err == nil {
+				aliasValue = fields
+			} else {
+				aliasValue = strings.Split(v, " ")
+			}
+
 			break
 		}
 	}
@@ -48,19 +77,38 @@ func findAlias(aliases map[string]string, origArgs []string) ([]string, []string
 	return aliasKey, aliasValue, foundAlias
 }
 
-func expandAlias(conf *config.Config, args []string) ([]string, bool, error) {
-	var newArgs []string
-	var origArgs []string
+func expandAlias(conf *config.Config, args []string, app *cobra.Command) ([]string, bool, error) {
+	fset := app.Flags()
 
-	for _, arg := range args[1:] {
-		if !strings.HasPrefix(arg, "-") {
-			break
-		}
-
-		newArgs = append(newArgs, arg)
+	nargs := fset.NArg()
+	firstArgIndex := 1
+	firstPosArgIndex := 0
+	if fset.Arg(0) == "__complete" {
+		nargs--
+		firstArgIndex++
+		firstPosArgIndex++
 	}
 
-	origArgs = append([]string{args[0]}, args[len(newArgs)+1:]...)
+	if nargs == 0 {
+		return nil, false, nil
+	}
+
+	lastFlagIndex := slices.Index(args, fset.Arg(firstPosArgIndex))
+
+	// newArgs contains all the flags before the first positional argument
+	newArgs := args[firstArgIndex:lastFlagIndex]
+
+	// origArgs contains everything except the flags in newArgs
+	origArgs := slices.Concat(args[:firstArgIndex], args[lastFlagIndex:])
+
+	// strip out completion subcommand and fragment from end
+	completion := false
+	completionFragment := ""
+	if len(origArgs) >= 3 && origArgs[1] == "__complete" {
+		completion = true
+		completionFragment = origArgs[len(origArgs)-1]
+		origArgs = append(origArgs[:1], origArgs[2:len(origArgs)-1]...)
+	}
 
 	aliasKey, aliasValue, foundAlias := findAlias(conf.Aliases, origArgs)
 	if !foundAlias {
@@ -116,7 +164,13 @@ func expandAlias(conf *config.Config, args []string) ([]string, bool, error) {
 	for _, aliasArg := range aliasValue {
 		// Only replace all @ARGS@ when it is not part of another string
 		if aliasArg == "@ARGS@" {
-			newArgs = append(newArgs, atArgs...)
+			// if completing we want to stop on @ARGS@ and append the completion below
+			if completion {
+				break
+			} else {
+				newArgs = append(newArgs, atArgs...)
+			}
+
 			hasReplacedArgsVar = true
 			continue
 		}
@@ -143,6 +197,12 @@ func expandAlias(conf *config.Config, args []string) ([]string, bool, error) {
 		newArgs = append(newArgs, aliasArg)
 	}
 
+	// add back in completion if it was stripped before
+	if completion {
+		newArgs = append([]string{newArgs[0], "__complete"}, newArgs[1:]...)
+		newArgs = append(newArgs, completionFragment)
+	}
+
 	// Add the rest of the arguments only if @ARGS@ wasn't used.
 	if !hasReplacedArgsVar {
 		newArgs = append(newArgs, atArgs...)
@@ -151,45 +211,19 @@ func expandAlias(conf *config.Config, args []string) ([]string, bool, error) {
 	return newArgs, true, nil
 }
 
-func execIfAliases() error {
-	args := os.Args
-
+func execIfAliases(app *cobra.Command) error {
 	// Avoid loops
 	if os.Getenv("INCUS_ALIASES") == "1" {
 		return nil
 	}
 
-	// Figure out the config directory and config path
-	var configDir string
-	if os.Getenv("INCUS_CONF") != "" {
-		configDir = os.Getenv("INCUS_CONF")
-	} else if os.Getenv("HOME") != "" {
-		configDir = path.Join(os.Getenv("HOME"), ".config", "incus")
-	} else {
-		user, err := user.Current()
-		if err != nil {
-			return nil
-		}
-
-		configDir = path.Join(user.HomeDir, ".config", "incus")
-	}
-
-	confPath := os.ExpandEnv(path.Join(configDir, "config.yml"))
-
-	// Load the configuration
-	var conf *config.Config
-	var err error
-	if shared.PathExists(confPath) {
-		conf, err = config.LoadConfig(confPath)
-		if err != nil {
-			return nil
-		}
-	} else {
-		conf = config.NewConfig(filepath.Dir(confPath), true)
+	conf, err := config.LoadConfig("")
+	if err != nil {
+		return fmt.Errorf(i18n.G("Failed to load configuration: %s"), err)
 	}
 
 	// Expand the aliases
-	newArgs, expanded, err := expandAlias(conf, args)
+	newArgs, expanded, err := expandAlias(conf, os.Args, app)
 	if err != nil {
 		return err
 	} else if !expanded {

@@ -101,6 +101,12 @@ type Network struct {
 	//
 	// API extension: clustering
 	Locations []string `json:"locations" yaml:"locations"`
+
+	// Project name
+	// Example: project1
+	//
+	// API extension: networks_all_projects
+	Project string `json:"project" yaml:"project"`
 }
 
 // Writable converts a full Network struct into a NetworkPut struct (filters read-only fields).
@@ -314,5 +320,24 @@ type NetworkStateVLAN struct {
 // API extension: network_state_ovn.
 type NetworkStateOVN struct {
 	// OVN network chassis name
+	// Example: server01
 	Chassis string `json:"chassis" yaml:"chassis"`
+
+	// OVN logical router name
+	// Example: incus-net1-lr
+	//
+	// API extension: network_state_ovn_lr
+	LogicalRouter string `json:"logical_router" yaml:"logical_router"`
+
+	// OVN network uplink ipv4 address
+	// Example: 10.0.0.1
+	//
+	// API extension: network_ovn_state_addresses
+	UplinkIPv4 string `json:"uplink_ipv4" yaml:"uplink_ipv4"`
+
+	// OVN network uplink ipv6 address
+	// Example: 2001:0000:130F:0000:0000:09C0:876A:130B.
+	//
+	// API extension: network_ovn_state_addresses
+	UplinkIPv6 string `json:"uplink_ipv6" yaml:"uplink_ipv6"`
 }

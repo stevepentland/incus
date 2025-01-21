@@ -31,7 +31,7 @@ type Cluster struct {
 // the cluster is required to provide when joining.
 //
 // The Value field is empty when getting clustering information with GET
-// /1.0/cluster, and should be filled by the joining node when performing a PUT
+// /1.0/cluster, and should be filled by the joining server when performing a PUT
 // /1.0/cluster join request.
 //
 // swagger:model
@@ -81,11 +81,11 @@ type ClusterPut struct {
 	// API extension: clustering_join
 	ServerAddress string `json:"server_address" yaml:"server_address"`
 
-	// The trust password of the cluster you're trying to join
+	// The cluster join token for the cluster you're trying to join
 	// Example: blah
 	//
 	// API extension: clustering_join
-	ClusterPassword string `json:"cluster_password" yaml:"cluster_password"`
+	ClusterToken string `json:"cluster_token" yaml:"cluster_token"`
 }
 
 // ClusterMembersPost represents the fields required to request a join token to add a member to the cluster.
@@ -301,8 +301,14 @@ type ClusterGroupPut struct {
 	Description string `json:"description" yaml:"description"`
 
 	// List of members in this group
-	// Example: ["node1", "node3"]
+	// Example: ["server01", "server02"]
 	Members []string `json:"members" yaml:"members"`
+
+	// Cluster group configuration map
+	// Example: {"user.mykey": "foo"}
+	//
+	// API extension: clustering_groups_config.
+	Config map[string]string `json:"config" yaml:"config"`
 }
 
 // Writable converts a full ClusterGroup struct into a ClusterGroupPut struct (filters read-only fields).

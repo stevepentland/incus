@@ -2,15 +2,21 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
 )
+
+type imageAliasColumns struct {
+	Name string
+	Data func(api.ImageAliasesEntry) string
+}
 
 type cmdImageAlias struct {
 	global *cmdGlobal
@@ -51,6 +57,8 @@ type cmdImageAliasCreate struct {
 	global     *cmdGlobal
 	image      *cmdImage
 	imageAlias *cmdImageAlias
+
+	flagDescription string
 }
 
 func (c *cmdImageAliasCreate) Command() *cobra.Command {
@@ -60,7 +68,26 @@ func (c *cmdImageAliasCreate) Command() *cobra.Command {
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
 		`Create aliases for existing images`))
 
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Image alias description")+"``")
+
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 1 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		if len(args) == 0 {
+			return c.global.cmpRemotes(toComplete, true)
+		}
+
+		remote, _, found := strings.Cut(args[0], ":")
+		if !found {
+			remote = ""
+		}
+
+		return c.global.cmpImageFingerprintsFromRemote(toComplete, remote)
+	}
 
 	return cmd
 }
@@ -88,6 +115,7 @@ func (c *cmdImageAliasCreate) Run(cmd *cobra.Command, args []string) error {
 	alias := api.ImageAliasesPost{}
 	alias.Name = resource.name
 	alias.Target = args[1]
+	alias.Description = c.flagDescription
 
 	return resource.server.CreateImageAlias(alias)
 }
@@ -108,6 +136,14 @@ func (c *cmdImageAliasDelete) Command() *cobra.Command {
 		`Delete image aliases`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		return c.global.cmpImages(toComplete)
+	}
 
 	return cmd
 }
@@ -141,7 +177,8 @@ type cmdImageAliasList struct {
 	image      *cmdImage
 	imageAlias *cmdImageAlias
 
-	flagFormat string
+	flagFormat  string
+	flagColumns string
 }
 
 func (c *cmdImageAliasList) Command() *cobra.Command {
@@ -153,13 +190,44 @@ func (c *cmdImageAliasList) Command() *cobra.Command {
 		`List image aliases
 
 Filters may be part of the image hash or part of the image alias name.
-`))
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+Default column layout: aftd
+
+== Columns ==
+The -c option takes a comma separated list of arguments that control
+which instance attributes to output when displaying in table or csv
+format.
+
+Column arguments are either pre-defined shorthand chars (see below),
+or (extended) config keys.
+
+Commas between consecutive shorthand chars are optional.
+
+Pre-defined column shorthand chars:
+  a - Alias
+  f - Fingerprint
+  t - Type
+  d - Description`))
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
+	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", defaultImageAliasColumns, i18n.G("Columns")+"``")
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
 
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		return c.global.cmpRemotes(toComplete, true)
+	}
+
 	return cmd
 }
+
+const defaultImageAliasColumns = "aftd"
 
 func (c *cmdImageAliasList) aliasShouldShow(filters []string, state *api.ImageAliasesEntry) bool {
 	if len(filters) == 0 {
@@ -173,6 +241,52 @@ func (c *cmdImageAliasList) aliasShouldShow(filters []string, state *api.ImageAl
 	}
 
 	return false
+}
+
+func (c *cmdImageAliasList) parseColumns() ([]imageAliasColumns, error) {
+	columnsShorthandMap := map[rune]imageAliasColumns{
+		'a': {i18n.G("ALIAS"), c.imageAliasNameColumnData},
+		'f': {i18n.G("FINGERPRINT"), c.targetColumnData},
+		't': {i18n.G("TYPE"), c.typeColumnData},
+		'd': {i18n.G("DESCRIPTION"), c.descriptionColumntData},
+	}
+
+	columnList := strings.Split(c.flagColumns, ",")
+
+	columns := []imageAliasColumns{}
+
+	for _, columnEntry := range columnList {
+		if columnEntry == "" {
+			return nil, fmt.Errorf(i18n.G("Empty column entry (redundant, leading or trailing command) in '%s'"), c.flagColumns)
+		}
+
+		for _, columnRune := range columnEntry {
+			column, ok := columnsShorthandMap[columnRune]
+			if !ok {
+				return nil, fmt.Errorf(i18n.G("Unknown column shorthand char '%c' in '%s'"), columnRune, columnEntry)
+			}
+
+			columns = append(columns, column)
+		}
+	}
+
+	return columns, nil
+}
+
+func (c *cmdImageAliasList) imageAliasNameColumnData(imageAlias api.ImageAliasesEntry) string {
+	return imageAlias.Name
+}
+
+func (c *cmdImageAliasList) targetColumnData(imageAlias api.ImageAliasesEntry) string {
+	return imageAlias.Target[0:12]
+}
+
+func (c *cmdImageAliasList) typeColumnData(imageAlias api.ImageAliasesEntry) string {
+	return strings.ToUpper(imageAlias.Type)
+}
+
+func (c *cmdImageAliasList) descriptionColumntData(imageAlias api.ImageAliasesEntry) string {
+	return imageAlias.Description
 }
 
 func (c *cmdImageAliasList) Run(cmd *cobra.Command, args []string) error {
@@ -214,6 +328,11 @@ func (c *cmdImageAliasList) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	columns, err := c.parseColumns()
+	if err != nil {
+		return err
+	}
+
 	// Render the table
 	data := [][]string{}
 	for _, alias := range aliases {
@@ -225,19 +344,22 @@ func (c *cmdImageAliasList) Run(cmd *cobra.Command, args []string) error {
 			alias.Type = "container"
 		}
 
-		data = append(data, []string{alias.Name, alias.Target[0:12], strings.ToUpper(alias.Type), alias.Description})
+		line := []string{}
+		for _, column := range columns {
+			line = append(line, column.Data(alias))
+		}
+
+		data = append(data, line)
 	}
 
 	sort.Sort(cli.StringList(data))
 
-	header := []string{
-		i18n.G("ALIAS"),
-		i18n.G("FINGERPRINT"),
-		i18n.G("TYPE"),
-		i18n.G("DESCRIPTION"),
+	header := []string{}
+	for _, column := range columns {
+		header = append(header, column.Name)
 	}
 
-	return cli.RenderTable(c.flagFormat, header, data, aliases)
+	return cli.RenderTable(os.Stdout, c.flagFormat, header, data, aliases)
 }
 
 // Rename.
@@ -256,6 +378,14 @@ func (c *cmdImageAliasRename) Command() *cobra.Command {
 		`Rename aliases`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		return c.global.cmpImages(toComplete)
+	}
 
 	return cmd
 }

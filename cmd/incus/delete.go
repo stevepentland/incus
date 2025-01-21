@@ -4,15 +4,16 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 type cmdDelete struct {
@@ -35,6 +36,10 @@ func (c *cmdDelete) Command() *cobra.Command {
 	cmd.Flags().BoolVarP(&c.flagForce, "force", "f", false, i18n.G("Force the removal of running instances"))
 	cmd.Flags().BoolVarP(&c.flagInteractive, "interactive", "i", false, i18n.G("Require user confirmation"))
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return c.global.cmpInstances(toComplete)
+	}
+
 	return cmd
 }
 
@@ -44,7 +49,7 @@ func (c *cmdDelete) promptDelete(name string) error {
 	input, _ := reader.ReadString('\n')
 	input = strings.TrimSuffix(input, "\n")
 
-	if !shared.StringInSlice(strings.ToLower(input), []string{i18n.G("yes")}) {
+	if !slices.Contains([]string{i18n.G("yes")}, strings.ToLower(input)) {
 		return fmt.Errorf(i18n.G("User aborted delete operation"))
 	}
 
@@ -82,6 +87,11 @@ func (c *cmdDelete) Run(cmd *cobra.Command, args []string) error {
 
 	// Process with deletion.
 	for _, resource := range resources {
+		connInfo, err := resource.server.GetConnectionInfo()
+		if err != nil {
+			return err
+		}
+
 		if c.flagInteractive {
 			err := c.promptDelete(resource.name)
 			if err != nil {
@@ -116,11 +126,11 @@ func (c *cmdDelete) Run(cmd *cobra.Command, args []string) error {
 			}
 
 			if ct.Ephemeral {
-				return nil
+				continue
 			}
 		}
 
-		if c.flagForceProtected && shared.IsTrue(ct.ExpandedConfig["security.protection.delete"]) {
+		if c.flagForceProtected && util.IsTrue(ct.ExpandedConfig["security.protection.delete"]) {
 			// Refresh in case we had to stop it above.
 			ct, etag, err := resource.server.GetInstance(resource.name)
 			if err != nil {
@@ -141,7 +151,7 @@ func (c *cmdDelete) Run(cmd *cobra.Command, args []string) error {
 
 		err = c.doDelete(resource.server, resource.name)
 		if err != nil {
-			return err
+			return fmt.Errorf(i18n.G("Failed deleting instance %q in project %q: %w"), resource.name, connInfo.Project, err)
 		}
 	}
 	return nil

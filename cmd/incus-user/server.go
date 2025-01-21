@@ -3,15 +3,22 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/incusd/revert"
-	"github.com/lxc/incus/incusd/util"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
+	incus "github.com/lxc/incus/v6/client"
+	"github.com/lxc/incus/v6/internal/linux"
+	internalUtil "github.com/lxc/incus/v6/internal/util"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/idmap"
+	"github.com/lxc/incus/v6/shared/revert"
+	"github.com/lxc/incus/v6/shared/subprocess"
+	localtls "github.com/lxc/incus/v6/shared/tls"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 func serverIsConfigured(client incus.InstanceServer) (bool, error) {
@@ -21,7 +28,7 @@ func serverIsConfigured(client incus.InstanceServer) (bool, error) {
 		return false, fmt.Errorf("Failed to list networks: %w", err)
 	}
 
-	if !shared.StringInSlice("incusbr0", networks) {
+	if !slices.Contains(networks, "incusbr0") {
 		// Couldn't find incusbr0.
 		return false, nil
 	}
@@ -32,7 +39,7 @@ func serverIsConfigured(client incus.InstanceServer) (bool, error) {
 		return false, fmt.Errorf("Failed to list storage pools: %w", err)
 	}
 
-	if !shared.StringInSlice("default", pools) {
+	if !slices.Contains(pools, "default") {
 		// No storage pool found.
 		return false, nil
 	}
@@ -47,9 +54,11 @@ func serverInitialConfiguration(client incus.InstanceServer) error {
 		return fmt.Errorf("Failed to get server info: %w", err)
 	}
 
-	availableBackends := util.AvailableStorageDrivers(info.Environment.StorageSupportedDrivers, util.PoolTypeLocal)
+	availableBackends := linux.AvailableStorageDrivers(internalUtil.VarPath(), info.Environment.StorageSupportedDrivers, internalUtil.PoolTypeLocal)
 
 	// Load the default profile.
+	var profileNeedsUpdate bool
+
 	profile, profileEtag, err := client.GetProfile("default")
 	if err != nil {
 		return fmt.Errorf("Failed to load default profile: %w", err)
@@ -67,11 +76,11 @@ func serverInitialConfiguration(client incus.InstanceServer) error {
 		pool.Name = "default"
 
 		// Check if ZFS supported.
-		if shared.StringInSlice("zfs", availableBackends) {
+		if slices.Contains(availableBackends, "zfs") {
 			pool.Driver = "zfs"
 
 			// Check if zsys.
-			poolName, _ := shared.RunCommand("zpool", "get", "-H", "-o", "value", "name", "rpool")
+			poolName, _ := subprocess.RunCommand("zpool", "get", "-H", "-o", "value", "name", "rpool")
 			if strings.TrimSpace(poolName) == "rpool" {
 				pool.Config["source"] = "rpool/incus"
 			}
@@ -92,6 +101,8 @@ func serverInitialConfiguration(client incus.InstanceServer) error {
 			"pool": "default",
 			"path": "/",
 		}
+
+		profileNeedsUpdate = true
 	}
 
 	// Look for networks.
@@ -126,12 +137,16 @@ func serverInitialConfiguration(client incus.InstanceServer) error {
 			"network": "incusbr0",
 			"name":    "eth0",
 		}
+
+		profileNeedsUpdate = true
 	}
 
 	// Update the default profile.
-	err = client.UpdateProfile("default", profile.Writable(), profileEtag)
-	if err != nil {
-		return fmt.Errorf("Failed to update default profile: %w", err)
+	if profileNeedsUpdate {
+		err = client.UpdateProfile("default", profile.Writable(), profileEtag)
+		if err != nil {
+			return fmt.Errorf("Failed to update default profile: %w", err)
+		}
 	}
 
 	return nil
@@ -140,10 +155,15 @@ func serverInitialConfiguration(client incus.InstanceServer) error {
 func serverSetupUser(uid uint32) error {
 	projectName := fmt.Sprintf("user-%d", uid)
 	networkName := fmt.Sprintf("incusbr-%d", uid)
-	userPath := filepath.Join("users", fmt.Sprintf("%d", uid))
+	if len(networkName) > 15 {
+		// For long UIDs, use a shorter slightly less descriptive interface name.
+		networkName = fmt.Sprintf("user-%d", uid)
+	}
+
+	userPath := internalUtil.VarPath("users", fmt.Sprintf("%d", uid))
 
 	// User account.
-	out, err := shared.RunCommand("getent", "passwd", fmt.Sprintf("%d", uid))
+	out, err := subprocess.RunCommand("getent", "passwd", fmt.Sprintf("%d", uid))
 	if err != nil {
 		return fmt.Errorf("Failed to retrieve user information: %w", err)
 	}
@@ -166,9 +186,11 @@ func serverSetupUser(uid uint32) error {
 	revert.Add(func() { _ = os.RemoveAll(userPath) })
 
 	// Generate certificate.
-	err = shared.FindOrGenCert(filepath.Join(userPath, "client.crt"), filepath.Join(userPath, "client.key"), true, false)
-	if err != nil {
-		return fmt.Errorf("Failed to generate user certificate: %w", err)
+	if !util.PathExists(filepath.Join(userPath, "client.crt")) || !util.PathExists(filepath.Join(userPath, "client.key")) {
+		err = localtls.FindOrGenCert(filepath.Join(userPath, "client.crt"), filepath.Join(userPath, "client.key"), true, false)
+		if err != nil {
+			return fmt.Errorf("Failed to generate user certificate: %w", err)
+		}
 	}
 
 	// Connect to the daemon.
@@ -179,13 +201,7 @@ func serverSetupUser(uid uint32) error {
 
 	_, _, _ = client.GetServer()
 
-	// Setup the project (with restrictions).
-	projects, err := client.GetProjectNames()
-	if err != nil {
-		return fmt.Errorf("Unable to retrieve project list: %w", err)
-	}
-
-	if !shared.StringInSlice(projectName, projects) {
+	if !slices.Contains(projectNames, projectName) {
 		// Create the project.
 		err := client.CreateProject(api.ProjectsPost{
 			Name: projectName,
@@ -214,13 +230,85 @@ func serverSetupUser(uid uint32) error {
 		}
 
 		revert.Add(func() { _ = client.DeleteProject(projectName) })
+
+		// Create user-specific bridge.
+		network := api.NetworksPost{}
+		network.Config = map[string]string{}
+		network.Type = "bridge"
+		network.Name = networkName
+		network.Description = fmt.Sprintf("Network for user restricted project %s", projectName)
+
+		err = client.CreateNetwork(network)
+		if err != nil && !api.StatusErrorCheck(err, http.StatusConflict) {
+			return fmt.Errorf("Failed to create network: %w", err)
+		}
+
+		// Setup default profile.
+		req := api.ProfilePut{
+			Description: "Default Incus profile",
+			Devices: map[string]map[string]string{
+				"root": {
+					"type": "disk",
+					"path": "/",
+					"pool": "default",
+				},
+				"eth0": {
+					"type":    "nic",
+					"name":    "eth0",
+					"network": networkName,
+				},
+			},
+		}
+
+		// Add uid/gid map if possible.
+		pwUID, err := strconv.ParseInt(pw[2], 10, 64)
+		if err != nil {
+			return err
+		}
+
+		pwGID, err := strconv.ParseInt(pw[3], 10, 64)
+		if err != nil {
+			return err
+		}
+
+		idmapset, err := idmap.NewSetFromSystem("", "root")
+		if err != nil && err != idmap.ErrSubidUnsupported {
+			return fmt.Errorf("Failed to load system idmap: %w", err)
+		}
+
+		idmapAllowed := true
+		if idmapset != nil {
+			entries := []idmap.Entry{
+				{IsUID: true, HostID: pwUID, MapRange: 1},
+				{IsGID: true, HostID: pwGID, MapRange: 1},
+			}
+
+			if !idmapset.Includes(&idmap.Set{Entries: entries}) {
+				idmapAllowed = false
+			}
+		}
+
+		if idmapAllowed {
+			req.Config = map[string]string{
+				"raw.idmap": fmt.Sprintf("uid %d %d\ngid %d %d", pwUID, pwUID, pwGID, pwGID),
+			}
+		}
+
+		err = client.UseProject(projectName).UpdateProfile("default", req, "")
+		if err != nil {
+			return fmt.Errorf("Unable to update the default profile: %w", err)
+		}
 	}
 
 	// Parse the certificate.
-	x509Cert, err := shared.ReadCert(filepath.Join(userPath, "client.crt"))
+	x509Cert, err := localtls.ReadCert(filepath.Join(userPath, "client.crt"))
 	if err != nil {
 		return fmt.Errorf("Unable to read user certificate: %w", err)
 	}
+
+	// Delete the certificate from the trust store if it already exists.
+	fingerprint := localtls.CertFingerprint(x509Cert)
+	_ = client.DeleteCertificate(fingerprint)
 
 	// Add the certificate to the trust store.
 	err = client.CreateCertificate(api.CertificatesPost{
@@ -236,41 +324,11 @@ func serverSetupUser(uid uint32) error {
 		return fmt.Errorf("Unable to add user certificate: %w", err)
 	}
 
-	revert.Add(func() { _ = client.DeleteCertificate(shared.CertFingerprint(x509Cert)) })
+	revert.Add(func() { _ = client.DeleteCertificate(localtls.CertFingerprint(x509Cert)) })
 
-	// Create user-specific bridge.
-	network := api.NetworksPost{}
-	network.Config = map[string]string{}
-	network.Type = "bridge"
-	network.Name = networkName
-	network.Description = fmt.Sprintf("Network for user restricted project user-%s", projectName)
-
-	err = client.CreateNetwork(network)
-	if err != nil {
-		return fmt.Errorf("Failed to create network: %w", err)
-	}
-
-	// Setup default profile.
-	err = client.UseProject(projectName).UpdateProfile("default", api.ProfilePut{
-		Description: "Default Incus profile",
-		Config: map[string]string{
-			"raw.idmap": fmt.Sprintf("uid %s %s\ngid %s %s", pw[2], pw[2], pw[3], pw[3]),
-		},
-		Devices: map[string]map[string]string{
-			"root": {
-				"type": "disk",
-				"path": "/",
-				"pool": "default",
-			},
-			"eth0": {
-				"type":    "nic",
-				"name":    "eth0",
-				"network": networkName,
-			},
-		},
-	}, "")
-	if err != nil {
-		return fmt.Errorf("Unable to update the default profile: %w", err)
+	// Add the new project to our list.
+	if !slices.Contains(projectNames, projectName) {
+		projectNames = append(projectNames, projectName)
 	}
 
 	revert.Success()

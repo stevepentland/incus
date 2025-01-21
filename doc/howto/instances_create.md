@@ -1,32 +1,32 @@
 (instances-create)=
 # How to create instances
 
-To create an instance, you can use either the `lxc init` or the `lxc launch` command.
-The `lxc init` command only creates the instance, while the `lxc launch` command creates and starts it.
+To create an instance, you can use either the [`incus init`](incus_create.md) or the [`incus launch`](incus_launch.md) command.
+The [`incus init`](incus_create.md) command only creates the instance, while the [`incus launch`](incus_launch.md) command creates and starts it.
 
 ## Usage
 
 Enter the following command to create a container:
 
-    lxc launch|init <image_server>:<image_name> <instance_name> [flags]
+    incus launch|init <image_server>:<image_name> <instance_name> [flags]
 
 Image
-: Images contain a basic operating system (for example, a Linux distribution) and some LXD-related information.
+: Images contain a basic operating system (for example, a Linux distribution) and some Incus-related information.
   Images for various operating systems are available on the built-in remote image servers.
   See {ref}`images` for more information.
 
-  Unless the image is available locally, you must specify the name of the image server and the name of the image (for example, `ubuntu:22.04` for the official 22.04 Ubuntu image).
+  Unless the image is available locally, you must specify the name of the image server and the name of the image (for example, `images:ubuntu/22.04` for the official 22.04 Ubuntu image).
 
 Instance name
-: Instance names must be unique within a LXD deployment (also within a cluster).
+: Instance names must be unique within an Incus deployment (also within a cluster).
   See {ref}`instance-properties` for additional requirements.
 
 Flags
-: See `lxc launch --help` or `lxc init --help` for a full list of flags.
+: See [`incus launch --help`](incus_launch.md) or [`incus init --help`](incus_create.md) for a full list of flags.
   The most common flags are:
 
   - `--config` to specify a configuration option for the new instance
-  - `--device` to override {ref}`device options <devices>` for a device provided through a profile
+  - `--device` to override {ref}`device options <devices>` for a device provided through a profile, or to specify an {ref}`initial configuration for the root disk device <devices-disk-initial-config>`
   - `--profile` to specify a {ref}`profile <profiles>` to use for the new instance
   - `--network` or `--storage` to make the new instance use a specific network or storage pool
   - `--target` to create the instance on a specific cluster member
@@ -38,47 +38,57 @@ Instead of specifying the instance configuration as flags, you can pass it to th
 
 For example, to launch a container with the configuration from `config.yaml`, enter the following command:
 
-    lxc launch ubuntu:22.04 ubuntu-config < config.yaml
+    incus launch images:ubuntu/22.04 ubuntu-config < config.yaml
 
 ```{tip}
-Check the contents of an existing instance configuration (`lxc config show <instance_name> -e`) to see the required syntax of the YAML file.
+Check the contents of an existing instance configuration ([`incus config show <instance_name> --expanded`](incus_config_show.md)) to see the required syntax of the YAML file.
 ```
 
 ## Examples
 
-The following examples use `lxc launch`, but you can use `lxc init` in the same way.
+The following examples use [`incus launch`](incus_launch.md), but you can use [`incus init`](incus_create.md) in the same way.
 
-### Launch a container
+### Launch a system container
 
-To launch a container with an Ubuntu 22.04 image from the `images` server using the instance name `ubuntu-container`, enter the following command:
+To launch a system container with an Ubuntu 22.04 image from the `images` server using the instance name `ubuntu-container`, enter the following command:
 
-    lxc launch ubuntu:22.04 ubuntu-container
+    incus launch images:ubuntu/22.04 ubuntu-container
+
+### Launch an application container
+
+To launch an application (OCI) container, you first need to add an image registry:
+
+    incus remote add oci-docker https://docker.io --protocol=oci
+
+And then can launch a container from one of its images:
+
+    incus launch oci-docker:hello-world --ephemeral --console
 
 ### Launch a virtual machine
 
 To launch a virtual machine with an Ubuntu 22.04 image from the `images` server using the instance name `ubuntu-vm`, enter the following command:
 
-    lxc launch ubuntu:22.04 ubuntu-vm --vm
+    incus launch images:ubuntu/22.04 ubuntu-vm --vm
 
 Or with a bigger disk:
 
-    lxc launch ubuntu:22.04 ubuntu-vm-big --vm --device root,size=30GiB
+    incus launch images:ubuntu/22.04 ubuntu-vm-big --vm --device root,size=30GiB
 
 ### Launch a container with specific configuration options
 
 To launch a container and limit its resources to one vCPU and 192 MiB of RAM, enter the following command:
 
-    lxc launch ubuntu:22.04 ubuntu-limited --config limits.cpu=1 --config limits.memory=192MiB
+    incus launch images:ubuntu/22.04 ubuntu-limited --config limits.cpu=1 --config limits.memory=192MiB
 
 ### Launch a VM on a specific cluster member
 
 To launch a virtual machine on the cluster member `server2`, enter the following command:
 
-    lxc launch ubuntu:22.04 ubuntu-container --vm --target server2
+    incus launch images:ubuntu/22.04 ubuntu-container --vm --target server2
 
 ### Launch a container with a specific instance type
 
-LXD supports simple instance types for clouds.
+Incus supports simple instance types for clouds.
 Those are represented as a string that can be passed at instance creation time.
 
 The syntax allows the three following forms:
@@ -95,7 +105,7 @@ For example, the following three instance types are equivalent:
 
 To launch a container with this instance type, enter the following command:
 
-    lxc launch ubuntu:22.04 my-instance --type t2.micro
+    incus launch images:ubuntu/22.04 my-instance --type t2.micro
 
 The list of supported clouds and instance types can be found at [`https://github.com/dustinkirkland/instance-type`](https://github.com/dustinkirkland/instance-type).
 
@@ -105,27 +115,59 @@ To launch a VM that boots from an ISO, you must first create a VM.
 Let's assume that we want to create a VM and install it from the ISO image.
 In this scenario, use the following command to create an empty VM:
 
-    lxc init iso-vm --empty --vm
+    incus init iso-vm --empty --vm
+
+```{note}
+Depending on the needs of the operating system being installed, you may want to allocate more CPU, memory or storage to the virtual machine.
+
+For example, for 2 CPUs, 4 GiB of memory and 50 GiB of storage, you can do:
+
+    incus init iso-vm --empty --vm -c limits.cpu=2 -c limits.memory=4GiB -d root,size=50GiB
+```
 
 The second step is to import an ISO image that can later be attached to the VM as a storage volume:
 
-    lxc storage volume import <path-to-image.iso> iso-volume --type=iso
+    incus storage volume import <pool> <path-to-image.iso> iso-volume --type=iso
 
 Lastly, you need to attach the custom ISO volume to the VM using the following command:
 
-    lxc config device add iso-vm iso-volume disk pool=default source=iso-volume boot.priority=10
+    incus config device add iso-vm iso-volume disk pool=<pool> source=iso-volume boot.priority=10
 
 The `boot.priority` configuration key ensures that the VM will boot from the ISO first.
 Start the VM and connect to the console as there might be a menu you need to interact with:
 
-    lxc start iso-vm --console
+    incus start iso-vm --console
 
 Once you're done in the serial console, you need to disconnect from the console using `ctrl+a-q`, and connect to the VGA console using the following command:
 
-    lxc console iso-vm --type=vga
+    incus console iso-vm --type=vga
 
 You should now see the installer. After the installation is done, you need to detach the custom ISO volume:
 
-    lxc storage volume detach default iso-volume iso-vm
+    incus storage volume detach <pool> iso-volume iso-vm
 
 Now the VM can be rebooted, and it will boot from disk.
+
+### Install the Incus Agent into virtual machine instances
+
+In order for features like direct command execution (`incus exec`), file transfers (`incus file`) and detailed usage metrics (`incus info`)
+to work properly with virtual machines, an agent software is provided by Incus.
+
+The virtual machine images from the [images](https://images.linuxcontainers.org) remote are pre-configured to load that agent on startup.
+
+For other virtual machines, you may want to manually install the agent.
+
+```{note}
+The Incus Agent is currently available only on Linux virtual machines.
+```
+
+Incus provides the agent through a remote `9p` file system with mount name `config`.
+To install the agent, you'll need to get access to the virtual machine and run the following commands:
+
+    mount -t 9p config /mnt
+    cd /mnt
+    ./install.sh
+
+The first line will mount the remote file system on the mount point `/mnt`.
+The subsequent commands will run the installation script `install.sh` to install and run the Incus Agent.
+You need to perform this task once.

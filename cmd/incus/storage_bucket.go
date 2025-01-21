@@ -3,18 +3,23 @@ package main
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/termios"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/ioprogress"
+	"github.com/lxc/incus/v6/shared/termios"
+	"github.com/lxc/incus/v6/shared/units"
 )
 
 type cmdStorageBucket struct {
@@ -64,6 +69,14 @@ func (c *cmdStorageBucket) Command() *cobra.Command {
 	storageBucketKeyCmd := cmdStorageBucketKey{global: c.global, storageBucket: c}
 	cmd.AddCommand(storageBucketKeyCmd.Command())
 
+	// Export.
+	storageBucketExportCmd := cmdStorageBucketExport{global: c.global, storageBucket: c}
+	cmd.AddCommand(storageBucketExportCmd.Command())
+
+	// Import.
+	storageBucketImporttCmd := cmdStorageBucketImport{global: c.global, storageBucket: c}
+	cmd.AddCommand(storageBucketImporttCmd.Command())
+
 	// Workaround for subcommand usage errors. See: https://github.com/spf13/cobra/issues/706
 	cmd.Args = cobra.NoArgs
 	cmd.Run = func(cmd *cobra.Command, args []string) { _ = cmd.Usage() }
@@ -74,6 +87,8 @@ func (c *cmdStorageBucket) Command() *cobra.Command {
 type cmdStorageBucketCreate struct {
 	global        *cmdGlobal
 	storageBucket *cmdStorageBucket
+
+	flagDescription string
 }
 
 func (c *cmdStorageBucketCreate) Command() *cobra.Command {
@@ -81,8 +96,15 @@ func (c *cmdStorageBucketCreate) Command() *cobra.Command {
 	cmd.Use = usage("create", i18n.G("[<remote>:]<pool> <bucket> [key=value...]"))
 	cmd.Short = i18n.G("Create new custom storage buckets")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(`Create new custom storage buckets`))
+	cmd.Example = cli.FormatSection("", i18n.G(`incus storage bucket create p1 b01
+	Create a new storage bucket named b01 in storage pool p1
+
+incus storage bucket create p1 b01 < config.yaml
+	Create a new storage bucket named b01 in storage pool p1 using the content of config.yaml`))
 
 	cmd.Flags().StringVar(&c.storageBucket.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Bucket description")+"``")
+
 	cmd.RunE = c.Run
 
 	return cmd
@@ -145,6 +167,10 @@ func (c *cmdStorageBucketCreate) Run(cmd *cobra.Command, args []string) error {
 		StorageBucketPut: bucketPut,
 	}
 
+	if c.flagDescription != "" {
+		bucket.Description = c.flagDescription
+	}
+
 	client := resource.server
 
 	// If a target was specified, create the bucket on the given member.
@@ -158,7 +184,7 @@ func (c *cmdStorageBucketCreate) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	if !c.global.flagQuiet {
-		fmt.Printf(i18n.G("Storage bucket %s created")+"\n", args[1])
+		fmt.Printf(i18n.G("Storage bucket %q created")+"\n", args[1])
 
 		if adminKey != nil {
 			fmt.Printf(i18n.G("Admin access key: %s")+"\n", adminKey.AccessKey)
@@ -225,7 +251,7 @@ func (c *cmdStorageBucketDelete) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	if !c.global.flagQuiet {
-		fmt.Printf(i18n.G("Storage bucket %s deleted")+"\n", args[1])
+		fmt.Printf(i18n.G("Storage bucket %q deleted")+"\n", args[1])
 	}
 
 	return nil
@@ -325,7 +351,7 @@ func (c *cmdStorageBucketEdit) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Spawn the editor.
-	content, err := shared.TextEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
+	content, err := textEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
 	if err != nil {
 		return err
 	}
@@ -348,7 +374,7 @@ func (c *cmdStorageBucketEdit) Run(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			content, err = shared.TextEditor("", content)
+			content, err = textEditor("", content)
 			if err != nil {
 				return err
 			}
@@ -441,7 +467,15 @@ func (c *cmdStorageBucketGet) Run(cmd *cobra.Command, args []string) error {
 type cmdStorageBucketList struct {
 	global        *cmdGlobal
 	storageBucket *cmdStorageBucket
-	flagFormat    string
+
+	flagFormat      string
+	flagAllProjects bool
+	flagColumns     string
+}
+
+type storageBucketColumn struct {
+	Name string
+	Data func(api.StorageBucket) string
 }
 
 func (c *cmdStorageBucketList) Command() *cobra.Command {
@@ -450,12 +484,93 @@ func (c *cmdStorageBucketList) Command() *cobra.Command {
 	cmd.Aliases = []string{"ls"}
 	cmd.Short = i18n.G("List storage buckets")
 
-	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(`List storage buckets`))
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
+		`List storage buckets
+
+Default column layout: ndL
+
+== Columns ==
+The -c option takes a comma separated list of arguments that control
+which network zone attributes to output when displaying in table or csv
+format.
+
+Column arguments are either pre-defined shorthand chars (see below),
+or (extended) config keys.
+
+Commas between consecutive shorthand chars are optional.
+
+Pre-defined column shorthand chars:
+  e - Project name
+  n - Name
+  d - Description
+  L - Location of the storage bucket (e.g. its cluster member)`))
+
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
+	cmd.Flags().BoolVar(&c.flagAllProjects, "all-projects", false, i18n.G("Display storage pool buckets from all projects"))
+	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", defaultStorageBucketColumns, i18n.G("Columns")+"``")
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
 
 	cmd.RunE = c.Run
 
 	return cmd
+}
+
+const defaultStorageBucketColumns = "nd"
+
+func (c *cmdStorageBucketList) parseColumns(clustered bool) ([]storageBucketColumn, error) {
+	columnsShorthandMap := map[rune]storageBucketColumn{
+		'e': {i18n.G("PROJECT"), c.projectColumnData},
+		'n': {i18n.G("NAME"), c.nameColumnData},
+		'd': {i18n.G("DESCRIPTION"), c.descriptionColumnData},
+		'L': {i18n.G("LOCATION"), c.locationColumnData},
+	}
+
+	columnList := strings.Split(c.flagColumns, ",")
+	columns := []storageBucketColumn{}
+
+	if c.flagColumns == defaultStorageBucketColumns && clustered {
+		columnList = append(columnList, "L")
+	}
+
+	if c.flagColumns == defaultStorageBucketColumns && c.flagAllProjects {
+		columnList = append([]string{"e"}, columnList...)
+	}
+
+	for _, columnEntry := range columnList {
+		if columnEntry == "" {
+			return nil, fmt.Errorf(i18n.G("Empty column entry (redundant, leading or trailing command) in '%s'"), c.flagColumns)
+		}
+
+		for _, columnRune := range columnEntry {
+			column, ok := columnsShorthandMap[columnRune]
+			if !ok {
+				return nil, fmt.Errorf(i18n.G("Unknown column shorthand char '%c' in '%s'"), columnRune, columnEntry)
+			}
+
+			columns = append(columns, column)
+		}
+	}
+
+	return columns, nil
+}
+
+func (c *cmdStorageBucketList) nameColumnData(bucket api.StorageBucket) string {
+	return bucket.Name
+}
+
+func (c *cmdStorageBucketList) descriptionColumnData(bucket api.StorageBucket) string {
+	return bucket.Description
+}
+
+func (c *cmdStorageBucketList) locationColumnData(bucket api.StorageBucket) string {
+	return bucket.Location
+}
+
+func (c *cmdStorageBucketList) projectColumnData(bucket api.StorageBucket) string {
+	return bucket.Project
 }
 
 func (c *cmdStorageBucketList) Run(cmd *cobra.Command, args []string) error {
@@ -479,39 +594,45 @@ func (c *cmdStorageBucketList) Run(cmd *cobra.Command, args []string) error {
 
 	client := resource.server
 
-	buckets, err := client.GetStoragePoolBuckets(resource.name)
-	if err != nil {
-		return err
+	var buckets []api.StorageBucket
+	if c.flagAllProjects {
+		buckets, err = client.GetStoragePoolBucketsAllProjects(resource.name)
+		if err != nil {
+			return err
+		}
+	} else {
+		buckets, err = client.GetStoragePoolBuckets(resource.name)
+		if err != nil {
+			return err
+		}
 	}
 
 	clustered := resource.server.IsClustered()
 
+	// Parse column flags.
+	columns, err := c.parseColumns(clustered)
+	if err != nil {
+		return err
+	}
+
 	data := make([][]string, 0, len(buckets))
 	for _, bucket := range buckets {
-		details := []string{
-			bucket.Name,
-			bucket.Description,
+		line := []string{}
+		for _, column := range columns {
+			line = append(line, column.Data(bucket))
 		}
 
-		if clustered {
-			details = append(details, bucket.Location)
-		}
-
-		data = append(data, details)
+		data = append(data, line)
 	}
 
 	sort.Sort(cli.SortColumnsNaturally(data))
 
-	header := []string{
-		i18n.G("NAME"),
-		i18n.G("DESCRIPTION"),
+	header := []string{}
+	for _, column := range columns {
+		header = append(header, column.Name)
 	}
 
-	if clustered {
-		header = append(header, i18n.G("LOCATION"))
-	}
-
-	return cli.RenderTable(c.flagFormat, header, data, buckets)
+	return cli.RenderTable(os.Stdout, c.flagFormat, header, data, buckets)
 }
 
 // Set.
@@ -757,6 +878,12 @@ type cmdStorageBucketKeyList struct {
 	global           *cmdGlobal
 	storageBucketKey *cmdStorageBucketKey
 	flagFormat       string
+	flagColumns      string
+}
+
+type storageBucketKeyListColumns struct {
+	Name string
+	Data func(api.StorageBucketKey) string
 }
 
 func (c *cmdStorageBucketKeyList) Command() *cobra.Command {
@@ -765,13 +892,78 @@ func (c *cmdStorageBucketKeyList) Command() *cobra.Command {
 	cmd.Aliases = []string{"ls"}
 	cmd.Short = i18n.G("List storage bucket keys")
 
-	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(`List storage bucket keys`))
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
+		`List storage bucket keys
+
+Default column layout: ndr
+
+== Columns ==
+The -c option takes a comma separated list of arguments that control
+which network zone attributes to output when displaying in table or csv
+format.
+
+Column arguments are either pre-defined shorthand chars (see below),
+or (extended) config keys.
+
+Commas between consecutive shorthand chars are optional.
+
+Pre-defined column shorthand chars:
+  n - Name
+  d - Description
+  r - Role`))
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
 	cmd.Flags().StringVar(&c.storageBucketKey.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", defaultStorageBucketKeyColumns, i18n.G("Columns")+"``")
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
 
 	cmd.RunE = c.Run
 
 	return cmd
+}
+
+const defaultStorageBucketKeyColumns = "ndr"
+
+func (c *cmdStorageBucketKeyList) parseColumns() ([]storageBucketKeyListColumns, error) {
+	columnsShorthandMap := map[rune]storageBucketKeyListColumns{
+		'n': {i18n.G("NAME"), c.nameColumnData},
+		'd': {i18n.G("DESCRIPTION"), c.descriptionColumnData},
+		'r': {i18n.G("ROLE"), c.roleColumnData},
+	}
+
+	columnList := strings.Split(c.flagColumns, ",")
+	columns := []storageBucketKeyListColumns{}
+
+	for _, columnEntry := range columnList {
+		if columnEntry == "" {
+			return nil, fmt.Errorf(i18n.G("Empty column entry (redundant, leading or trailing command) in '%s'"), c.flagColumns)
+		}
+
+		for _, columnRune := range columnEntry {
+			column, ok := columnsShorthandMap[columnRune]
+			if !ok {
+				return nil, fmt.Errorf(i18n.G("Unknown column shorthand char '%c' in '%s'"), columnRune, columnEntry)
+			}
+
+			columns = append(columns, column)
+		}
+	}
+
+	return columns, nil
+}
+
+func (c *cmdStorageBucketKeyList) nameColumnData(buckKey api.StorageBucketKey) string {
+	return buckKey.Name
+}
+
+func (c *cmdStorageBucketKeyList) descriptionColumnData(buckKey api.StorageBucketKey) string {
+	return buckKey.Description
+}
+
+func (c *cmdStorageBucketKeyList) roleColumnData(buckKey api.StorageBucketKey) string {
+	return buckKey.Role
 }
 
 func (c *cmdStorageBucketKeyList) Run(cmd *cobra.Command, args []string) error {
@@ -809,26 +1001,30 @@ func (c *cmdStorageBucketKeyList) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Parse column flags.
+	columns, err := c.parseColumns()
+	if err != nil {
+		return err
+	}
+
 	data := make([][]string, 0, len(bucketKeys))
 	for _, bucketKey := range bucketKeys {
-		details := []string{
-			bucketKey.Name,
-			bucketKey.Description,
-			bucketKey.Role,
+		line := []string{}
+		for _, column := range columns {
+			line = append(line, column.Data(bucketKey))
 		}
 
-		data = append(data, details)
+		data = append(data, line)
 	}
 
 	sort.Sort(cli.SortColumnsNaturally(data))
 
-	header := []string{
-		i18n.G("NAME"),
-		i18n.G("DESCRIPTION"),
-		i18n.G("ROLE"),
+	header := []string{}
+	for _, column := range columns {
+		header = append(header, column.Name)
 	}
 
-	return cli.RenderTable(c.flagFormat, header, data, bucketKeys)
+	return cli.RenderTable(os.Stdout, c.flagFormat, header, data, bucketKeys)
 }
 
 // Create Key.
@@ -838,6 +1034,7 @@ type cmdStorageBucketKeyCreate struct {
 	flagRole         string
 	flagAccessKey    string
 	flagSecretKey    string
+	flagDescription  string
 }
 
 func (c *cmdStorageBucketKeyCreate) Command() *cobra.Command {
@@ -845,12 +1042,19 @@ func (c *cmdStorageBucketKeyCreate) Command() *cobra.Command {
 	cmd.Use = usage("create", i18n.G("[<remote>:]<pool> <bucket> <key>"))
 	cmd.Short = i18n.G("Create key for a storage bucket")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Create key for a storage bucket"))
+	cmd.Example = cli.FormatSection("", i18n.G(`incus storage bucket key create p1 b01 k1
+	Create a key called k1 for the bucket b01 in the pool p1.
+
+incus storage bucket key create p1 b01 k1 < config.yaml
+	Create a key called k1 for the bucket b01 in the pool p1 using the content of config.yaml.`))
+
 	cmd.RunE = c.RunAdd
 
 	cmd.Flags().StringVar(&c.storageBucketKey.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 	cmd.Flags().StringVar(&c.flagRole, "role", "read-only", i18n.G("Role (admin or read-only)")+"``")
 	cmd.Flags().StringVar(&c.flagAccessKey, "access-key", "", i18n.G("Access key (auto-generated if empty)")+"``")
 	cmd.Flags().StringVar(&c.flagSecretKey, "secret-key", "", i18n.G("Secret key (auto-generated if empty)")+"``")
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Key description")+"``")
 
 	return cmd
 }
@@ -889,13 +1093,39 @@ func (c *cmdStorageBucketKeyCreate) RunAdd(cmd *cobra.Command, args []string) er
 		client = client.UseTarget(c.storageBucketKey.flagTarget)
 	}
 
+	// If stdin isn't a terminal, read yaml from it.
+	var bucketKeyPut api.StorageBucketKeyPut
+	if !termios.IsTerminal(getStdinFd()) {
+		contents, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+
+		err = yaml.UnmarshalStrict(contents, &bucketKeyPut)
+		if err != nil {
+			return err
+		}
+	}
+
 	req := api.StorageBucketKeysPost{
-		Name: args[2],
-		StorageBucketKeyPut: api.StorageBucketKeyPut{
-			Role:      c.flagRole,
-			AccessKey: c.flagAccessKey,
-			SecretKey: c.flagSecretKey,
-		},
+		Name:                args[2],
+		StorageBucketKeyPut: bucketKeyPut,
+	}
+
+	if c.flagRole != "" {
+		req.Role = c.flagRole
+	}
+
+	if c.flagAccessKey != "" {
+		req.AccessKey = c.flagAccessKey
+	}
+
+	if c.flagSecretKey != "" {
+		req.SecretKey = c.flagSecretKey
+	}
+
+	if c.flagDescription != "" {
+		req.Description = c.flagDescription
 	}
 
 	key, err := client.CreateStoragePoolBucketKey(resource.name, args[1], req)
@@ -904,7 +1134,7 @@ func (c *cmdStorageBucketKeyCreate) RunAdd(cmd *cobra.Command, args []string) er
 	}
 
 	if !c.global.flagQuiet {
-		fmt.Printf(i18n.G("Storage bucket key %s added")+"\n", key.Name)
+		fmt.Printf(i18n.G("Storage bucket key %q added")+"\n", key.Name)
 		fmt.Printf(i18n.G("Access key: %s")+"\n", key.AccessKey)
 		fmt.Printf(i18n.G("Secret key: %s")+"\n", key.SecretKey)
 	}
@@ -970,7 +1200,7 @@ func (c *cmdStorageBucketKeyDelete) RunRemove(cmd *cobra.Command, args []string)
 	}
 
 	if !c.global.flagQuiet {
-		fmt.Printf(i18n.G("Storage bucket key %s removed")+"\n", args[2])
+		fmt.Printf(i18n.G("Storage bucket key %q removed")+"\n", args[2])
 	}
 
 	return nil
@@ -1074,7 +1304,7 @@ func (c *cmdStorageBucketKeyEdit) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Spawn the editor.
-	content, err := shared.TextEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
+	content, err := textEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
 	if err != nil {
 		return err
 	}
@@ -1097,7 +1327,7 @@ func (c *cmdStorageBucketKeyEdit) Run(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			content, err = shared.TextEditor("", content)
+			content, err = textEditor("", content)
 			if err != nil {
 				return err
 			}
@@ -1177,6 +1407,257 @@ func (c *cmdStorageBucketKeyShow) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%s", data)
+
+	return nil
+}
+
+type cmdStorageBucketExport struct {
+	global        *cmdGlobal
+	storageBucket *cmdStorageBucket
+
+	flagCompressionAlgorithm string
+}
+
+// Command generates the command definition.
+func (c *cmdStorageBucketExport) Command() *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Use = usage("export", i18n.G("[<remote>:]<pool> <bucket> [<path>]"))
+	cmd.Short = i18n.G("Export storage bucket")
+	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
+		`Export storage buckets as tarball.`))
+	cmd.Example = cli.FormatSection("", i18n.G(
+		`incus storage bucket export default b1
+    Download a backup tarball of the b1 storage bucket from the default pool.`))
+
+	cmd.Flags().StringVar(&c.flagCompressionAlgorithm, "compression", "", i18n.G("Define a compression algorithm: for backup or none")+"``")
+	cmd.Flags().StringVar(&c.storageBucket.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+
+	cmd.RunE = c.Run
+
+	return cmd
+}
+
+// Run runs the actual command logic.
+func (c *cmdStorageBucketExport) Run(cmd *cobra.Command, args []string) error {
+	// Quick checks.
+	exit, err := c.global.CheckArgs(cmd, args, 2, 3)
+	if exit {
+		return err
+	}
+
+	// Parse remote.
+	resources, err := c.global.ParseServers(args[0])
+	if err != nil {
+		return err
+	}
+
+	pool := resources[0]
+	if pool.name == "" {
+		return fmt.Errorf(i18n.G("Missing pool name"))
+	}
+
+	bucketName := args[1]
+	if bucketName == "" {
+		return fmt.Errorf(i18n.G("Missing bucket name"))
+	}
+
+	s := pool.server
+
+	// If a target was specified, use the bucket on the given member.
+	if c.storageBucket.flagTarget != "" {
+		s = s.UseTarget(c.storageBucket.flagTarget)
+	}
+
+	req := api.StorageBucketBackupsPost{
+		Name:                 "",
+		ExpiresAt:            time.Now().Add(23 * time.Hour),
+		CompressionAlgorithm: c.flagCompressionAlgorithm,
+	}
+
+	op, err := s.CreateStoragePoolBucketBackup(pool.name, bucketName, req)
+	if err != nil {
+		return fmt.Errorf(i18n.G("Failed to create backup: %v"), err)
+	}
+
+	// Watch the background operation
+	progress := cli.ProgressRenderer{
+		Format: i18n.G("Backing up storage bucket: %s"),
+		Quiet:  c.global.flagQuiet,
+	}
+
+	_, err = op.AddHandler(progress.UpdateOp)
+	if err != nil {
+		progress.Done("")
+		return err
+	}
+
+	// Wait until backup is done
+	err = cli.CancelableWait(op, &progress)
+	if err != nil {
+		progress.Done("")
+		return err
+	}
+
+	progress.Done("")
+
+	err = op.Wait()
+	if err != nil {
+		return err
+	}
+
+	// Get name of backup
+	utStr := op.Get().Resources["backups"][0]
+	u, err := url.Parse(utStr)
+	if err != nil {
+		return fmt.Errorf(i18n.G("Invalid URL %q: %w"), utStr, err)
+	}
+
+	backupName, err := url.PathUnescape(path.Base(u.EscapedPath()))
+	if err != nil {
+		return fmt.Errorf(i18n.G("Invalid backup name segment in path %q: %w"), u.EscapedPath(), err)
+	}
+
+	defer func() {
+		// Delete backup after we're done
+		op, err := s.DeleteStoragePoolBucketBackup(pool.name, bucketName, backupName)
+		if err == nil {
+			_ = op.Wait()
+		}
+	}()
+
+	var targetName string
+	if len(args) > 2 {
+		targetName = args[2]
+	} else {
+		targetName = "backup.tar.gz"
+	}
+
+	target, err := os.Create(targetName)
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = target.Close() }()
+
+	// Prepare the download request
+	progress = cli.ProgressRenderer{
+		Format: i18n.G("Exporting backup of storage bucket: %s"),
+		Quiet:  c.global.flagForceLocal,
+	}
+
+	backupFileRequest := incus.BackupFileRequest{
+		BackupFile:      io.WriteSeeker(target),
+		ProgressHandler: progress.UpdateProgress,
+	}
+
+	// Export tarball
+	_, err = s.GetStoragePoolBucketBackupFile(pool.name, bucketName, backupName, &backupFileRequest)
+	if err != nil {
+		_ = os.Remove(targetName)
+		progress.Done("")
+		return fmt.Errorf(i18n.G("Failed to fetch storage bucket backup: %w"), err)
+	}
+
+	progress.Done(i18n.G("Backup exported successfully!"))
+
+	return nil
+}
+
+// Import.
+type cmdStorageBucketImport struct {
+	global        *cmdGlobal
+	storageBucket *cmdStorageBucket
+}
+
+// Command generates the command definition.
+func (c *cmdStorageBucketImport) Command() *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Use = usage("import", i18n.G("[<remote>:]<pool> <backup file> [<bucket>]"))
+	cmd.Short = i18n.G("Import storage bucket")
+	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
+		`Import backups of storage buckets.`))
+	cmd.Example = cli.FormatSection("", i18n.G(
+		`incus storage bucket import default backup0.tar.gz
+		Create a new storage bucket using backup0.tar.gz as the source.`))
+	cmd.Flags().StringVar(&c.storageBucket.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+	cmd.RunE = c.Run
+
+	return cmd
+}
+
+// Run runs the actual command logic.
+func (c *cmdStorageBucketImport) Run(cmd *cobra.Command, args []string) error {
+	conf := c.global.conf
+
+	// Quick checks.
+	exit, err := c.global.CheckArgs(cmd, args, 2, 3)
+	if exit {
+		return err
+	}
+
+	// Connect to the daemon.
+	remote, pool, err := conf.ParseRemote(args[0])
+	if err != nil {
+		return err
+	}
+
+	d, err := conf.GetInstanceServer(remote)
+	if err != nil {
+		return err
+	}
+
+	// Use the provided target.
+	if c.storageBucket.flagTarget != "" {
+		d = d.UseTarget(c.storageBucket.flagTarget)
+	}
+
+	file, err := os.Open(args[1])
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = file.Close() }()
+
+	fstat, err := file.Stat()
+	if err != nil {
+		return err
+	}
+
+	bucketName := ""
+	if len(args) >= 3 {
+		bucketName = args[2]
+	}
+
+	progress := cli.ProgressRenderer{
+		Format: i18n.G("Importing bucket: %s"),
+		Quiet:  c.global.flagQuiet,
+	}
+
+	createArgs := incus.StoragePoolBucketBackupArgs{
+		BackupFile: &ioprogress.ProgressReader{
+			ReadCloser: file,
+			Tracker: &ioprogress.ProgressTracker{
+				Length: fstat.Size(),
+				Handler: func(percent int64, speed int64) {
+					progress.UpdateProgress(ioprogress.ProgressData{Text: fmt.Sprintf("%d%% (%s/s)", percent, units.GetByteSizeString(speed, 2))})
+				},
+			},
+		},
+		Name: bucketName,
+	}
+
+	op, err := d.CreateStoragePoolBucketFromBackup(pool, createArgs)
+	if err != nil {
+		return err
+	}
+
+	err = cli.CancelableWait(op, &progress)
+	if err != nil {
+		progress.Done("")
+		return err
+	}
+
+	progress.Done("")
 
 	return nil
 }

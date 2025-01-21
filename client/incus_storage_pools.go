@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/lxc/incus/shared/api"
+	"github.com/lxc/incus/v6/shared/api"
 )
 
 // Storage pool handling functions
@@ -65,10 +65,6 @@ func (r *ProtocolIncus) GetStoragePool(name string) (*api.StoragePool, string, e
 func (r *ProtocolIncus) CreateStoragePool(pool api.StoragePoolsPost) error {
 	if !r.HasExtension("storage") {
 		return fmt.Errorf("The server is missing the required \"storage\" API extension")
-	}
-
-	if pool.Driver == "ceph" && !r.HasExtension("storage_driver_ceph") {
-		return fmt.Errorf("The server is missing the required \"storage_driver_ceph\" API extension")
 	}
 
 	// Send the request

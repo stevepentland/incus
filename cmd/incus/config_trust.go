@@ -9,17 +9,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/termios"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/termios"
+	localtls "github.com/lxc/incus/v6/shared/tls"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 type cmdConfigTrust struct {
@@ -37,6 +39,10 @@ func (c *cmdConfigTrust) Command() *cobra.Command {
 	// Add
 	configTrustAddCmd := cmdConfigTrustAdd{global: c.global, config: c.config, configTrust: c}
 	cmd.AddCommand(configTrustAddCmd.Command())
+
+	// Add certificate
+	configTrustAddCertificateCmd := cmdConfigTrustAddCertificate{global: c.global, config: c.config, configTrust: c}
+	cmd.AddCommand(configTrustAddCertificateCmd.Command())
 
 	// Edit
 	configTrustEditCmd := cmdConfigTrustEdit{global: c.global, config: c.config, configTrust: c}
@@ -74,33 +80,22 @@ type cmdConfigTrustAdd struct {
 	config      *cmdConfig
 	configTrust *cmdConfigTrust
 
-	flagName       string
 	flagProjects   string
 	flagRestricted bool
-	flagType       string
 }
 
 func (c *cmdConfigTrustAdd) Command() *cobra.Command {
 	cmd := &cobra.Command{}
-	cmd.Use = usage("add", i18n.G("[<remote>:] [<cert>]"))
+	cmd.Use = usage("add", i18n.G("[<remote>:]<name>"))
 	cmd.Short = i18n.G("Add new trusted client")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
 		`Add new trusted client
 
-The following certificate types are supported:
-- client (default)
-- metrics
-
-If the certificate is omitted, a token will be generated and returned. A client
-providing a valid token will have its client certificate added to the trusted list
-and the consumed token will be invalidated. Similar to certificates, tokens can be
-restricted to one or more projects.
+This will issue a trust token to be used by the client to add itself to the trust store.
 `))
 
 	cmd.Flags().BoolVar(&c.flagRestricted, "restricted", false, i18n.G("Restrict the certificate to one or more projects"))
 	cmd.Flags().StringVar(&c.flagProjects, "projects", "", i18n.G("List of projects to restrict the certificate to")+"``")
-	cmd.Flags().StringVar(&c.flagName, "name", "", i18n.G("Alternative certificate name")+"``")
-	cmd.Flags().StringVar(&c.flagType, "type", "client", i18n.G("Type of certificate")+"``")
 
 	cmd.RunE = c.Run
 
@@ -109,20 +104,114 @@ restricted to one or more projects.
 
 func (c *cmdConfigTrustAdd) Run(cmd *cobra.Command, args []string) error {
 	// Quick checks.
-	exit, err := c.global.CheckArgs(cmd, args, 0, 2)
+	exit, err := c.global.CheckArgs(cmd, args, 1, 1)
+	if exit {
+		return err
+	}
+
+	// Parse remote.
+	resources, err := c.global.ParseServers(args[0])
+	if err != nil {
+		return err
+	}
+
+	resource := resources[0]
+	if resource.name == "" {
+		return fmt.Errorf(i18n.G("A client name must be provided"))
+	}
+
+	// Prepare the request.
+	cert := api.CertificatesPost{}
+	cert.Token = true
+	cert.Name = resource.name
+	cert.Type = api.CertificateTypeClient
+	cert.Restricted = c.flagRestricted
+
+	if c.flagProjects != "" {
+		cert.Projects = strings.Split(c.flagProjects, ",")
+	}
+
+	// Create the token.
+	op, err := resource.server.CreateCertificateToken(cert)
+	if err != nil {
+		return err
+	}
+
+	opAPI := op.Get()
+	certificateToken, err := opAPI.ToCertificateAddToken()
+	if err != nil {
+		return fmt.Errorf(i18n.G("Failed converting token operation to certificate add token: %w"), err)
+	}
+
+	if !c.global.flagQuiet {
+		fmt.Printf(i18n.G("Client %s certificate add token:")+"\n", cert.Name)
+	}
+
+	fmt.Println(certificateToken.String())
+
+	return nil
+}
+
+// Add certificate.
+type cmdConfigTrustAddCertificate struct {
+	global      *cmdGlobal
+	config      *cmdConfig
+	configTrust *cmdConfigTrust
+
+	flagProjects    string
+	flagRestricted  bool
+	flagName        string
+	flagType        string
+	flagDescription string
+}
+
+func (c *cmdConfigTrustAddCertificate) Command() *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Use = usage("add-certificate", i18n.G("[<remote>:] <cert>"))
+	cmd.Short = i18n.G("Add new trusted client certificate")
+	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
+		`Add new trusted client certificate
+
+The following certificate types are supported:
+- client (default)
+- metrics
+`))
+
+	cmd.Flags().BoolVar(&c.flagRestricted, "restricted", false, i18n.G("Restrict the certificate to one or more projects"))
+	cmd.Flags().StringVar(&c.flagProjects, "projects", "", i18n.G("List of projects to restrict the certificate to")+"``")
+	cmd.Flags().StringVar(&c.flagName, "name", "", i18n.G("Alternative certificate name")+"``")
+	cmd.Flags().StringVar(&c.flagType, "type", "client", i18n.G("Type of certificate")+"``")
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Certificate description")+"``")
+
+	cmd.RunE = c.Run
+
+	return cmd
+}
+
+func (c *cmdConfigTrustAddCertificate) Run(cmd *cobra.Command, args []string) error {
+	// Quick checks.
+	exit, err := c.global.CheckArgs(cmd, args, 1, 2)
 	if exit {
 		return err
 	}
 
 	// Validate flags.
-	if !shared.StringInSlice(c.flagType, []string{"client", "metrics"}) {
+	if !slices.Contains([]string{"client", "metrics"}, c.flagType) {
 		return fmt.Errorf(i18n.G("Unknown certificate type %q"), c.flagType)
 	}
 
 	// Parse remote
 	remote := ""
-	if len(args) > 0 {
+	path := ""
+	if len(args) > 1 {
 		remote = args[0]
+		path = args[1]
+	} else {
+		path = args[0]
+	}
+
+	if path == "-" {
+		path = "/dev/stdin"
 	}
 
 	resources, err := c.global.ParseServers(remote)
@@ -132,89 +221,44 @@ func (c *cmdConfigTrustAdd) Run(cmd *cobra.Command, args []string) error {
 
 	resource := resources[0]
 
+	// Check that the path exists.
+	if !util.PathExists(path) {
+		return fmt.Errorf(i18n.G("Provided certificate path doesn't exist: %s"), path)
+	}
+
+	// Validate server support for metrics.
 	if c.flagType == "metrics" && !resource.server.HasExtension("metrics") {
 		return errors.New("The server doesn't implement metrics")
 	}
 
-	cert := api.CertificatesPost{}
-
-	// Check if remote is the first argument
-	// to detect method of adding trusted client
-	useToken := false
-	if len(args) == 0 || (len(args) == 1 && resource.name == "") {
-		useToken = true
+	// Load the certificate.
+	x509Cert, err := localtls.ReadCert(path)
+	if err != nil {
+		return err
 	}
 
-	if useToken {
-		// Use token
-		cert.Token = true
-
-		if c.flagName != "" {
-			cert.Name = c.flagName
-		} else {
-			cert.Name, err = cli.AskString(i18n.G("Please provide client name: "), "", nil)
-			if err != nil {
-				return err
-			}
-		}
+	var name string
+	if c.flagName != "" {
+		name = c.flagName
 	} else {
-		// Load the certificate.
-		fname := args[len(args)-1]
-		if fname == "-" {
-			fname = "/dev/stdin"
-		}
-
-		var name string
-		if c.flagName != "" {
-			name = c.flagName
-		} else {
-			name = filepath.Base(fname)
-		}
-
-		// Add trust relationship.
-		x509Cert, err := shared.ReadCert(fname)
-		if err != nil {
-			return err
-		}
-
-		cert.Certificate = base64.StdEncoding.EncodeToString(x509Cert.Raw)
-		cert.Name = name
+		name = filepath.Base(path)
 	}
+
+	// Add trust relationship.
+	cert := api.CertificatesPost{}
+	cert.Certificate = base64.StdEncoding.EncodeToString(x509Cert.Raw)
+	cert.Name = name
+	cert.Description = c.flagDescription
 
 	if c.flagType == "client" {
 		cert.Type = api.CertificateTypeClient
 	} else if c.flagType == "metrics" {
-		if cert.Token {
-			return fmt.Errorf(i18n.G("Cannot use metrics type certificate when using a token"))
-		}
-
 		cert.Type = api.CertificateTypeMetrics
 	}
 
 	cert.Restricted = c.flagRestricted
 	if c.flagProjects != "" {
 		cert.Projects = strings.Split(c.flagProjects, ",")
-	}
-
-	if cert.Token {
-		op, err := resource.server.CreateCertificateToken(cert)
-		if err != nil {
-			return err
-		}
-
-		opAPI := op.Get()
-		certificateToken, err := opAPI.ToCertificateAddToken()
-		if err != nil {
-			return fmt.Errorf(i18n.G("Failed converting token operation to certificate add token: %w"), err)
-		}
-
-		if !c.global.flagQuiet {
-			fmt.Printf(i18n.G("Client %s certificate add token:")+"\n", cert.Name)
-		}
-
-		fmt.Println(certificateToken.String())
-
-		return nil
 	}
 
 	return resource.server.CreateCertificate(cert)
@@ -294,7 +338,7 @@ func (c *cmdConfigTrustEdit) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Spawn the editor
-	content, err := shared.TextEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
+	content, err := textEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
 	if err != nil {
 		return err
 	}
@@ -317,7 +361,7 @@ func (c *cmdConfigTrustEdit) Run(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			content, err = shared.TextEditor("", content)
+			content, err = textEditor("", content)
 			if err != nil {
 				return err
 			}
@@ -337,7 +381,18 @@ type cmdConfigTrustList struct {
 	config      *cmdConfig
 	configTrust *cmdConfigTrust
 
-	flagFormat string
+	flagFormat  string
+	flagColumns string
+}
+
+type certificateColumn struct {
+	Name string
+	Data func(rowData rowData) string
+}
+
+type rowData struct {
+	Cert    api.Certificate
+	TlsCert *x509.Certificate
 }
 
 func (c *cmdConfigTrustList) Command() *cobra.Command {
@@ -346,18 +401,126 @@ func (c *cmdConfigTrustList) Command() *cobra.Command {
 	cmd.Aliases = []string{"ls"}
 	cmd.Short = i18n.G("List trusted clients")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
-		`List trusted clients`))
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+		`List trusted clients
+
+The -c option takes a (optionally comma-separated) list of arguments
+that control which certificate attributes to output when displaying in table
+or csv format.
+
+Default column layout is: ntdfe
+
+Column shorthand chars:
+
+	n - Name
+	t - Type
+	c - Common Name
+	f - Fingerprint
+	d - Description
+	i - Issue date
+	e - Expiry date
+	r - Whether certificate is restricted
+	p - Newline-separated list of projects`))
+
+	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", "ntdfe", i18n.G("Columns")+"``")
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
 
 	cmd.RunE = c.Run
 
 	return cmd
 }
 
+func (c *cmdConfigTrustList) parseColumns() ([]certificateColumn, error) {
+	columnsShorthandMap := map[rune]certificateColumn{
+		'n': {i18n.G("NAME"), c.nameColumnData},
+		't': {i18n.G("TYPE"), c.typeColumnData},
+		'c': {i18n.G("COMMON NAME"), c.commonNameColumnData},
+		'f': {i18n.G("FINGERPRINT"), c.fingerprintColumnData},
+		'd': {i18n.G("DESCRIPTION"), c.descriptionColumnData},
+		'i': {i18n.G("ISSUE DATE"), c.issueDateColumnData},
+		'e': {i18n.G("EXPIRY DATE"), c.expiryDateColumnData},
+		'r': {i18n.G("RESTRICTED"), c.restrictedColumnData},
+		'p': {i18n.G("PROJECTS"), c.projectColumnData},
+	}
+
+	columnList := strings.Split(c.flagColumns, ",")
+
+	columns := []certificateColumn{}
+	for _, columnEntry := range columnList {
+		if columnEntry == "" {
+			return nil, fmt.Errorf(i18n.G("Empty column entry (redundant, leading or trailing command) in '%s'"), c.flagColumns)
+		}
+
+		for _, columnRune := range columnEntry {
+			column, ok := columnsShorthandMap[columnRune]
+			if ok {
+				columns = append(columns, column)
+			} else {
+				return nil, fmt.Errorf(i18n.G("Unknown column shorthand char '%c' in '%s'"), columnRune, columnEntry)
+			}
+		}
+	}
+
+	return columns, nil
+}
+
+func (c *cmdConfigTrustList) typeColumnData(rowData rowData) string {
+	return rowData.Cert.Type
+}
+
+func (c *cmdConfigTrustList) nameColumnData(rowData rowData) string {
+	return rowData.Cert.Name
+}
+
+func (c *cmdConfigTrustList) commonNameColumnData(rowData rowData) string {
+	return rowData.TlsCert.Subject.CommonName
+}
+
+func (c *cmdConfigTrustList) fingerprintColumnData(rowData rowData) string {
+	return rowData.Cert.Fingerprint[0:12]
+}
+
+func (c *cmdConfigTrustList) descriptionColumnData(rowData rowData) string {
+	return rowData.Cert.Description
+}
+
+func (c *cmdConfigTrustList) issueDateColumnData(rowData rowData) string {
+	return rowData.TlsCert.NotBefore.Local().Format(dateLayout)
+}
+
+func (c *cmdConfigTrustList) expiryDateColumnData(rowData rowData) string {
+	return rowData.TlsCert.NotAfter.Local().Format(dateLayout)
+}
+
+func (c *cmdConfigTrustList) restrictedColumnData(rowData rowData) string {
+	if rowData.Cert.Restricted {
+		return i18n.G("yes")
+	}
+
+	return i18n.G("no")
+}
+
+func (c *cmdConfigTrustList) projectColumnData(rowData rowData) string {
+	projects := []string{}
+	projects = append(projects, rowData.Cert.Projects...)
+
+	sort.Strings(projects)
+	return strings.Join(projects, "\n")
+}
+
 func (c *cmdConfigTrustList) Run(cmd *cobra.Command, args []string) error {
 	// Quick checks.
 	exit, err := c.global.CheckArgs(cmd, args, 0, 1)
 	if exit {
+		return err
+	}
+
+	// Process the columns
+	columns, err := c.parseColumns()
+	if err != nil {
 		return err
 	}
 
@@ -382,8 +545,6 @@ func (c *cmdConfigTrustList) Run(cmd *cobra.Command, args []string) error {
 
 	data := [][]string{}
 	for _, cert := range trust {
-		fp := cert.Fingerprint[0:12]
-
 		certBlock, _ := pem.Decode([]byte(cert.Certificate))
 		if certBlock == nil {
 			return fmt.Errorf(i18n.G("Invalid certificate"))
@@ -394,24 +555,24 @@ func (c *cmdConfigTrustList) Run(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
-		const layout = "Jan 2, 2006 at 3:04pm (MST)"
-		issue := tlsCert.NotBefore.Format(layout)
-		expiry := tlsCert.NotAfter.Format(layout)
-		data = append(data, []string{cert.Type, cert.Name, tlsCert.Subject.CommonName, fp, issue, expiry})
+		rowData := rowData{cert, tlsCert}
+
+		row := []string{}
+		for _, column := range columns {
+			row = append(row, column.Data(rowData))
+		}
+
+		data = append(data, row)
 	}
 
 	sort.Sort(cli.StringList(data))
 
-	header := []string{
-		i18n.G("TYPE"),
-		i18n.G("NAME"),
-		i18n.G("COMMON NAME"),
-		i18n.G("FINGERPRINT"),
-		i18n.G("ISSUE DATE"),
-		i18n.G("EXPIRY DATE"),
+	headers := []string{}
+	for _, column := range columns {
+		headers = append(headers, column.Name)
 	}
 
-	return cli.RenderTable(c.flagFormat, header, data, trust)
+	return cli.RenderTable(os.Stdout, c.flagFormat, headers, data, trust)
 }
 
 // List tokens.
@@ -420,7 +581,13 @@ type cmdConfigTrustListTokens struct {
 	config      *cmdConfig
 	configTrust *cmdConfigTrust
 
-	flagFormat string
+	flagFormat  string
+	flagColumns string
+}
+
+type configTrustListTokenColumn struct {
+	Name string
+	Data func(*api.CertificateAddToken) string
 }
 
 func (c *cmdConfigTrustListTokens) Command() *cobra.Command {
@@ -428,12 +595,80 @@ func (c *cmdConfigTrustListTokens) Command() *cobra.Command {
 	cmd.Use = usage("list-tokens", i18n.G("[<remote>:]"))
 	cmd.Short = i18n.G("List all active certificate add tokens")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
-		`List all active certificate add tokens`))
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+		`List all active certificate add tokens
+
+Default column layout: ntE
+
+== Columns ==
+The -c option takes a comma separated list of arguments that control
+which network zone attributes to output when displaying in table or csv
+format.
+
+Column arguments are either pre-defined shorthand chars (see below),
+or (extended) config keys.
+
+Commas between consecutive shorthand chars are optional.
+
+Pre-defined column shorthand chars:
+  n - Name
+  t - Token
+  E - Expires At`))
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
+	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", defaultConfigTrustListTokenColumns, i18n.G("Columns")+"``")
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
 
 	cmd.RunE = c.Run
 
 	return cmd
+}
+
+const defaultConfigTrustListTokenColumns = "ntE"
+
+func (c *cmdConfigTrustListTokens) parseColumns() ([]configTrustListTokenColumn, error) {
+	columnsShorthandMap := map[rune]configTrustListTokenColumn{
+		'n': {i18n.G("NAME"), c.clientNameColumnData},
+		't': {i18n.G("TOKEN"), c.tokenColumnData},
+		'E': {i18n.G("EXPIRES AT"), c.expiresAtColumnData},
+	}
+
+	columnList := strings.Split(c.flagColumns, ",")
+	columns := []configTrustListTokenColumn{}
+
+	for _, columnEntry := range columnList {
+		if columnEntry == "" {
+			return nil, fmt.Errorf(i18n.G("Empty column entry (redundant, leading or trailing command) in '%s'"), c.flagColumns)
+		}
+
+		for _, columnRune := range columnEntry {
+			column, ok := columnsShorthandMap[columnRune]
+			if !ok {
+				return nil, fmt.Errorf(i18n.G("Unknown column shorthand char '%c' in '%s'"), columnRune, columnEntry)
+			}
+
+			columns = append(columns, column)
+		}
+	}
+
+	return columns, nil
+}
+
+func (c *cmdConfigTrustListTokens) clientNameColumnData(token *api.CertificateAddToken) string {
+	return token.ClientName
+}
+
+func (c *cmdConfigTrustListTokens) tokenColumnData(token *api.CertificateAddToken) string {
+	return token.String()
+}
+
+func (c *cmdConfigTrustListTokens) expiresAtColumnData(token *api.CertificateAddToken) string {
+	if token.ExpiresAt.IsZero() {
+		return " "
+	}
+
+	return token.ExpiresAt.Local().Format(dateLayout)
 }
 
 func (c *cmdConfigTrustListTokens) Run(cmd *cobra.Command, args []string) error {
@@ -457,19 +692,19 @@ func (c *cmdConfigTrustListTokens) Run(cmd *cobra.Command, args []string) error 
 	resource := resources[0]
 
 	// Get the certificate add tokens. Use default project as join tokens are created in default project.
-	ops, err := resource.server.UseProject("default").GetOperations()
+	ops, err := resource.server.UseProject(api.ProjectDefaultName).GetOperations()
 	if err != nil {
 		return err
 	}
 
-	// Convert the join token operation into encoded form for display.
-	type displayToken struct {
-		ClientName string
-		Token      string
-		ExpiresAt  string
-	}
+	data := [][]string{}
+	joinTokens := []*api.CertificateAddToken{}
 
-	displayTokens := make([]displayToken, 0)
+	// Parse column flags.
+	columns, err := c.parseColumns()
+	if err != nil {
+		return err
+	}
 
 	for _, op := range ops {
 		if op.Class != api.OperationClassToken {
@@ -485,36 +720,23 @@ func (c *cmdConfigTrustListTokens) Run(cmd *cobra.Command, args []string) error 
 			continue // Operation is not a valid certificate add token operation.
 		}
 
-		var expiresAt string
-
-		// Only show the expiry date if available, otherwise show an empty string.
-		if joinToken.ExpiresAt.Unix() > 0 {
-			expiresAt = joinToken.ExpiresAt.Format("2006/01/02 15:04 MST")
+		line := []string{}
+		for _, column := range columns {
+			line = append(line, column.Data(joinToken))
 		}
 
-		displayTokens = append(displayTokens, displayToken{
-			ClientName: joinToken.ClientName,
-			Token:      joinToken.String(),
-			ExpiresAt:  expiresAt,
-		})
-	}
-
-	// Render the table.
-	data := [][]string{}
-	for _, token := range displayTokens {
-		line := []string{token.ClientName, token.Token, token.ExpiresAt}
+		joinTokens = append(joinTokens, joinToken)
 		data = append(data, line)
 	}
 
 	sort.Sort(cli.SortColumnsNaturally(data))
 
-	header := []string{
-		i18n.G("NAME"),
-		i18n.G("TOKEN"),
-		i18n.G("EXPIRES AT"),
+	header := []string{}
+	for _, column := range columns {
+		header = append(header, column.Name)
 	}
 
-	return cli.RenderTable(c.flagFormat, header, data, displayTokens)
+	return cli.RenderTable(os.Stdout, c.flagFormat, header, data, joinTokens)
 }
 
 // Remove.
@@ -598,7 +820,7 @@ func (c *cmdConfigTrustRevokeToken) Run(cmd *cobra.Command, args []string) error
 	resource := resources[0]
 
 	// Get the certificate add tokens. Use default project as certificate add tokens are created in default project.
-	ops, err := resource.server.UseProject("default").GetOperations()
+	ops, err := resource.server.UseProject(api.ProjectDefaultName).GetOperations()
 	if err != nil {
 		return err
 	}

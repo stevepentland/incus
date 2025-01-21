@@ -6,11 +6,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	config "github.com/lxc/incus/internal/cliconfig"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/internal/instance"
+	"github.com/lxc/incus/v6/shared/api"
+	config "github.com/lxc/incus/v6/shared/cliconfig"
 )
 
 // Rebuild.
@@ -71,7 +71,7 @@ func (c *cmdRebuild) rebuild(conf *config.Config, args []string) error {
 	}
 
 	// We are not rebuilding just a snapshot but an instance
-	if strings.Contains(name, shared.SnapshotDelimiter) {
+	if strings.Contains(name, instance.SnapshotDelimiter) {
 		return fmt.Errorf(i18n.G("Instance snapshots cannot be rebuilt: %s"), name)
 	}
 
@@ -126,7 +126,7 @@ func (c *cmdRebuild) rebuild(conf *config.Config, args []string) error {
 			return err
 		}
 
-		if conf.Remotes[iremote].Protocol != "simplestreams" {
+		if conf.Remotes[iremote].Protocol == "incus" {
 			if imgInfo.Type != "virtual-machine" && current.Type == "virtual-machine" {
 				return fmt.Errorf(i18n.G("Asked for a VM but image is of type container"))
 			}

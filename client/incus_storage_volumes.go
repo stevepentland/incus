@@ -7,11 +7,11 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	"github.com/lxc/incus/shared/cancel"
-	"github.com/lxc/incus/shared/ioprogress"
-	"github.com/lxc/incus/shared/units"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/cancel"
+	"github.com/lxc/incus/v6/shared/ioprogress"
+	localtls "github.com/lxc/incus/v6/shared/tls"
+	"github.com/lxc/incus/v6/shared/units"
 )
 
 // Storage volumes handling function
@@ -63,7 +63,7 @@ func (r *ProtocolIncus) GetStoragePoolVolumeNamesAllProjects(pool string) (map[s
 
 		project := resourceURL.Query().Get("project")
 		if project == "" {
-			project = "default"
+			project = api.ProjectDefaultName
 		}
 
 		_, after, found := strings.Cut(resourceURL.Path, fmt.Sprintf("%s/", u.URL.Path))
@@ -362,9 +362,31 @@ func (r *ProtocolIncus) MigrateStoragePoolVolume(pool string, volume api.Storage
 		return nil, fmt.Errorf("Can't ask for a rename through MigrateStoragePoolVolume")
 	}
 
+	var req any
+	var path string
+
+	srcVolParentName, srcVolSnapName, srcIsSnapshot := api.GetParentAndSnapshotName(volume.Name)
+	if srcIsSnapshot {
+		err := r.CheckExtension("storage_api_remote_volume_snapshot_copy")
+		if err != nil {
+			return nil, err
+		}
+
+		// Set the actual name of the snapshot without delimiter.
+		req = api.StorageVolumeSnapshotPost{
+			Name:      srcVolSnapName,
+			Migration: volume.Migration,
+			Target:    volume.Target,
+		}
+
+		path = api.NewURL().Path("storage-pools", pool, "volumes", "custom", srcVolParentName, "snapshots", srcVolSnapName).String()
+	} else {
+		req = volume
+		path = api.NewURL().Path("storage-pools", pool, "volumes", "custom", volume.Name).String()
+	}
+
 	// Send the request
-	path := fmt.Sprintf("/storage-pools/%s/volumes/custom/%s", url.PathEscape(pool), volume.Name)
-	op, _, err := r.queryOperation("POST", path, volume, "")
+	op, _, err := r.queryOperation("POST", path, req, "")
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +432,7 @@ func (r *ProtocolIncus) tryMigrateStoragePoolVolume(source InstanceServer, pool 
 			if err != nil {
 				errors = append(errors, remoteOperationResult{URL: serverURL, Error: err})
 
-				if shared.IsConnectionError(err) {
+				if localtls.IsConnectionError(err) {
 					continue
 				}
 
@@ -472,7 +494,7 @@ func (r *ProtocolIncus) tryCreateStoragePoolVolume(pool string, req api.StorageV
 			if err != nil {
 				errors = append(errors, remoteOperationResult{URL: serverURL, Error: err})
 
-				if shared.IsConnectionError(err) {
+				if localtls.IsConnectionError(err) {
 					continue
 				}
 
@@ -507,15 +529,20 @@ func (r *ProtocolIncus) CopyStoragePoolVolume(pool string, source InstanceServer
 		return nil, fmt.Errorf("The target server is missing the required \"custom_volume_refresh\" API extension")
 	}
 
+	if args != nil && args.RefreshExcludeOlder && !r.HasExtension("custom_volume_refresh_exclude_older_snapshots") {
+		return nil, fmt.Errorf("The target server is missing the required \"custom_volume_refresh_exclude_older_snapshots\" API extension")
+	}
+
 	req := api.StorageVolumesPost{
 		Name: args.Name,
 		Type: volume.Type,
 		Source: api.StorageVolumeSource{
-			Name:       volume.Name,
-			Type:       "copy",
-			Pool:       sourcePool,
-			VolumeOnly: args.VolumeOnly,
-			Refresh:    args.Refresh,
+			Name:                volume.Name,
+			Type:                "copy",
+			Pool:                sourcePool,
+			VolumeOnly:          args.VolumeOnly,
+			Refresh:             args.Refresh,
+			RefreshExcludeOlder: args.RefreshExcludeOlder,
 		},
 	}
 
@@ -533,7 +560,10 @@ func (r *ProtocolIncus) CopyStoragePoolVolume(pool string, source InstanceServer
 		return nil, fmt.Errorf("Failed to get destination connection info: %w", err)
 	}
 
-	if destInfo.URL == sourceInfo.URL && destInfo.SocketPath == sourceInfo.SocketPath && (volume.Location == r.clusterTarget || (volume.Location == "none" && r.clusterTarget == "")) {
+	clusterInternalVolumeCopy := r.CheckExtension("cluster_internal_custom_volume_copy") == nil
+
+	// Copy the storage pool volume locally.
+	if destInfo.URL == sourceInfo.URL && destInfo.SocketPath == sourceInfo.SocketPath && (volume.Location == r.clusterTarget || (volume.Location == "none" && r.clusterTarget == "") || clusterInternalVolumeCopy) {
 		// Project handling
 		if destInfo.Project != sourceInfo.Project {
 			if !r.HasExtension("storage_api_project") {
@@ -541,6 +571,10 @@ func (r *ProtocolIncus) CopyStoragePoolVolume(pool string, source InstanceServer
 			}
 
 			req.Source.Project = sourceInfo.Project
+		}
+
+		if clusterInternalVolumeCopy {
+			req.Source.Location = sourceInfo.Target
 		}
 
 		// Send the request
@@ -785,8 +819,8 @@ func (r *ProtocolIncus) RenameStoragePoolVolume(pool string, volType string, nam
 	return nil
 }
 
-// GetStoragePoolVolumeBackupNames returns a list of volume backup names.
-func (r *ProtocolIncus) GetStoragePoolVolumeBackupNames(pool string, volName string) ([]string, error) {
+// GetStorageVolumeBackupNames returns a list of volume backup names.
+func (r *ProtocolIncus) GetStorageVolumeBackupNames(pool string, volName string) ([]string, error) {
 	if !r.HasExtension("custom_volume_backup") {
 		return nil, fmt.Errorf("The server is missing the required \"custom_volume_backup\" API extension")
 	}
@@ -803,14 +837,14 @@ func (r *ProtocolIncus) GetStoragePoolVolumeBackupNames(pool string, volName str
 	return urlsToResourceNames(baseURL, urls...)
 }
 
-// GetStoragePoolVolumeBackups returns a list of custom volume backups.
-func (r *ProtocolIncus) GetStoragePoolVolumeBackups(pool string, volName string) ([]api.StoragePoolVolumeBackup, error) {
+// GetStorageVolumeBackups returns a list of custom volume backups.
+func (r *ProtocolIncus) GetStorageVolumeBackups(pool string, volName string) ([]api.StorageVolumeBackup, error) {
 	if !r.HasExtension("custom_volume_backup") {
 		return nil, fmt.Errorf("The server is missing the required \"custom_volume_backup\" API extension")
 	}
 
 	// Fetch the raw value
-	backups := []api.StoragePoolVolumeBackup{}
+	backups := []api.StorageVolumeBackup{}
 
 	_, err := r.queryStruct("GET", fmt.Sprintf("/storage-pools/%s/volumes/custom/%s/backups?recursion=1", url.PathEscape(pool), url.PathEscape(volName)), nil, "", &backups)
 	if err != nil {
@@ -820,14 +854,14 @@ func (r *ProtocolIncus) GetStoragePoolVolumeBackups(pool string, volName string)
 	return backups, nil
 }
 
-// GetStoragePoolVolumeBackup returns a custom volume backup.
-func (r *ProtocolIncus) GetStoragePoolVolumeBackup(pool string, volName string, name string) (*api.StoragePoolVolumeBackup, string, error) {
+// GetStorageVolumeBackup returns a custom volume backup.
+func (r *ProtocolIncus) GetStorageVolumeBackup(pool string, volName string, name string) (*api.StorageVolumeBackup, string, error) {
 	if !r.HasExtension("custom_volume_backup") {
 		return nil, "", fmt.Errorf("The server is missing the required \"custom_volume_backup\" API extension")
 	}
 
 	// Fetch the raw value
-	backup := api.StoragePoolVolumeBackup{}
+	backup := api.StorageVolumeBackup{}
 	etag, err := r.queryStruct("GET", fmt.Sprintf("/storage-pools/%s/volumes/custom/%s/backups/%s", url.PathEscape(pool), url.PathEscape(volName), url.PathEscape(name)), nil, "", &backup)
 	if err != nil {
 		return nil, "", err
@@ -836,8 +870,8 @@ func (r *ProtocolIncus) GetStoragePoolVolumeBackup(pool string, volName string, 
 	return &backup, etag, nil
 }
 
-// CreateStoragePoolVolumeBackup creates new custom volume backup.
-func (r *ProtocolIncus) CreateStoragePoolVolumeBackup(pool string, volName string, backup api.StoragePoolVolumeBackupsPost) (Operation, error) {
+// CreateStorageVolumeBackup creates new custom volume backup.
+func (r *ProtocolIncus) CreateStorageVolumeBackup(pool string, volName string, backup api.StorageVolumeBackupsPost) (Operation, error) {
 	if !r.HasExtension("custom_volume_backup") {
 		return nil, fmt.Errorf("The server is missing the required \"custom_volume_backup\" API extension")
 	}
@@ -851,8 +885,8 @@ func (r *ProtocolIncus) CreateStoragePoolVolumeBackup(pool string, volName strin
 	return op, nil
 }
 
-// RenameStoragePoolVolumeBackup renames a custom volume backup.
-func (r *ProtocolIncus) RenameStoragePoolVolumeBackup(pool string, volName string, name string, backup api.StoragePoolVolumeBackupPost) (Operation, error) {
+// RenameStorageVolumeBackup renames a custom volume backup.
+func (r *ProtocolIncus) RenameStorageVolumeBackup(pool string, volName string, name string, backup api.StorageVolumeBackupPost) (Operation, error) {
 	if !r.HasExtension("custom_volume_backup") {
 		return nil, fmt.Errorf("The server is missing the required \"custom_volume_backup\" API extension")
 	}
@@ -866,8 +900,8 @@ func (r *ProtocolIncus) RenameStoragePoolVolumeBackup(pool string, volName strin
 	return op, nil
 }
 
-// DeleteStoragePoolVolumeBackup deletes a custom volume backup.
-func (r *ProtocolIncus) DeleteStoragePoolVolumeBackup(pool string, volName string, name string) (Operation, error) {
+// DeleteStorageVolumeBackup deletes a custom volume backup.
+func (r *ProtocolIncus) DeleteStorageVolumeBackup(pool string, volName string, name string) (Operation, error) {
 	if !r.HasExtension("custom_volume_backup") {
 		return nil, fmt.Errorf("The server is missing the required \"custom_volume_backup\" API extension")
 	}
@@ -881,8 +915,8 @@ func (r *ProtocolIncus) DeleteStoragePoolVolumeBackup(pool string, volName strin
 	return op, nil
 }
 
-// GetStoragePoolVolumeBackupFile requests the custom volume backup content.
-func (r *ProtocolIncus) GetStoragePoolVolumeBackupFile(pool string, volName string, name string, req *BackupFileRequest) (*BackupFileResponse, error) {
+// GetStorageVolumeBackupFile requests the custom volume backup content.
+func (r *ProtocolIncus) GetStorageVolumeBackupFile(pool string, volName string, name string, req *BackupFileRequest) (*BackupFileResponse, error) {
 	if !r.HasExtension("custom_volume_backup") {
 		return nil, fmt.Errorf("The server is missing the required \"custom_volume_backup\" API extension")
 	}
@@ -890,8 +924,10 @@ func (r *ProtocolIncus) GetStoragePoolVolumeBackupFile(pool string, volName stri
 	// Build the URL
 	uri := fmt.Sprintf("%s/1.0/storage-pools/%s/volumes/custom/%s/backups/%s/export", r.httpBaseURL.String(), url.PathEscape(pool), url.PathEscape(volName), url.PathEscape(name))
 
-	if r.project != "" {
-		uri += fmt.Sprintf("?project=%s", url.QueryEscape(r.project))
+	// Add project/target
+	uri, err := r.setQueryAttributes(uri)
+	if err != nil {
+		return nil, err
 	}
 
 	// Prepare the download request
@@ -946,10 +982,14 @@ func (r *ProtocolIncus) GetStoragePoolVolumeBackupFile(pool string, volName stri
 }
 
 // CreateStoragePoolVolumeFromISO creates a custom volume from an ISO file.
-func (r *ProtocolIncus) CreateStoragePoolVolumeFromISO(pool string, args StoragePoolVolumeBackupArgs) (Operation, error) {
+func (r *ProtocolIncus) CreateStoragePoolVolumeFromISO(pool string, args StorageVolumeBackupArgs) (Operation, error) {
 	err := r.CheckExtension("custom_volume_iso")
 	if err != nil {
 		return nil, err
+	}
+
+	if args.Name == "" {
+		return nil, fmt.Errorf("Missing volume name")
 	}
 
 	path := fmt.Sprintf("/storage-pools/%s/volumes/custom", url.PathEscape(pool))
@@ -963,10 +1003,6 @@ func (r *ProtocolIncus) CreateStoragePoolVolumeFromISO(pool string, args Storage
 	req, err := http.NewRequest("POST", reqURL, args.BackupFile)
 	if err != nil {
 		return nil, err
-	}
-
-	if args.Name == "" {
-		return nil, fmt.Errorf("Missing volume name")
 	}
 
 	req.Header.Set("Content-Type", "application/octet-stream")
@@ -1004,7 +1040,7 @@ func (r *ProtocolIncus) CreateStoragePoolVolumeFromISO(pool string, args Storage
 }
 
 // CreateStoragePoolVolumeFromBackup creates a custom volume from a backup file.
-func (r *ProtocolIncus) CreateStoragePoolVolumeFromBackup(pool string, args StoragePoolVolumeBackupArgs) (Operation, error) {
+func (r *ProtocolIncus) CreateStoragePoolVolumeFromBackup(pool string, args StorageVolumeBackupArgs) (Operation, error) {
 	if !r.HasExtension("custom_volume_backup") {
 		return nil, fmt.Errorf(`The server is missing the required "custom_volume_backup" API extension`)
 	}

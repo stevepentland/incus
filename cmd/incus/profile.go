@@ -5,18 +5,23 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/termios"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/termios"
 )
+
+type profileColumn struct {
+	Name string
+	Data func(api.Profile) string
+}
 
 type cmdProfile struct {
 	global *cmdGlobal
@@ -106,6 +111,18 @@ func (c *cmdProfileAdd) Command() *cobra.Command {
 
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpProfiles(args[0], false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -177,6 +194,14 @@ incus profile assign foo ''
     Remove all profile from "foo"`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		return c.global.cmpProfiles(args[0], false)
+	}
 
 	return cmd
 }
@@ -254,6 +279,18 @@ func (c *cmdProfileCopy) Command() *cobra.Command {
 
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpProfiles(toComplete, true)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpProfiles(toComplete, true)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -311,6 +348,8 @@ func (c *cmdProfileCopy) Run(cmd *cobra.Command, args []string) error {
 type cmdProfileCreate struct {
 	global  *cmdGlobal
 	profile *cmdProfile
+
+	flagDescription string
 }
 
 func (c *cmdProfileCreate) Command() *cobra.Command {
@@ -319,17 +358,47 @@ func (c *cmdProfileCreate) Command() *cobra.Command {
 	cmd.Short = i18n.G("Create profiles")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
 		`Create profiles`))
+	cmd.Example = cli.FormatSection("", i18n.G(`incus profile create p1
+    Create a profile named p1
+
+incus profile create p1 < config.yaml
+    Create a profile named p1 with configuration from config.yaml`))
 
 	cmd.RunE = c.Run
+
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Profile description")+"``")
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpRemotes(toComplete, false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
 
 func (c *cmdProfileCreate) Run(cmd *cobra.Command, args []string) error {
+	var stdinData api.ProfilePut
+
 	// Quick checks.
 	exit, err := c.global.CheckArgs(cmd, args, 1, 1)
 	if exit {
 		return err
+	}
+
+	// If stdin isn't a terminal, read text from it
+	if !termios.IsTerminal(getStdinFd()) {
+		contents, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+
+		err = yaml.Unmarshal(contents, &stdinData)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Parse remote
@@ -347,6 +416,11 @@ func (c *cmdProfileCreate) Run(cmd *cobra.Command, args []string) error {
 	// Create the profile
 	profile := api.ProfilesPost{}
 	profile.Name = resource.name
+	profile.ProfilePut = stdinData
+
+	if c.flagDescription != "" {
+		profile.Description = c.flagDescription
+	}
 
 	err = resource.server.CreateProfile(profile)
 	if err != nil {
@@ -375,6 +449,14 @@ func (c *cmdProfileDelete) Command() *cobra.Command {
 		`Delete profiles`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpProfiles(toComplete, true)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -428,6 +510,14 @@ func (c *cmdProfileEdit) Command() *cobra.Command {
     Update a profile using the content of profile.yaml`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpProfiles(toComplete, true)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -500,7 +590,7 @@ func (c *cmdProfileEdit) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Spawn the editor
-	content, err := shared.TextEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
+	content, err := textEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
 	if err != nil {
 		return err
 	}
@@ -523,7 +613,7 @@ func (c *cmdProfileEdit) Run(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			content, err = shared.TextEditor("", content)
+			content, err = textEditor("", content)
 			if err != nil {
 				return err
 			}
@@ -555,6 +645,19 @@ func (c *cmdProfileGet) Command() *cobra.Command {
 	cmd.RunE = c.Run
 
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Get the key as a profile property"))
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpProfiles(toComplete, true)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpProfileConfigs(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -600,9 +703,11 @@ func (c *cmdProfileGet) Run(cmd *cobra.Command, args []string) error {
 
 // List.
 type cmdProfileList struct {
-	global     *cmdGlobal
-	profile    *cmdProfile
-	flagFormat string
+	global          *cmdGlobal
+	profile         *cmdProfile
+	flagFormat      string
+	flagColumns     string
+	flagAllProjects bool
 }
 
 func (c *cmdProfileList) Command() *cobra.Command {
@@ -611,12 +716,92 @@ func (c *cmdProfileList) Command() *cobra.Command {
 	cmd.Aliases = []string{"ls"}
 	cmd.Short = i18n.G("List profiles")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
-		`List profiles`))
+		`List profiles
+
+The -c option takes a (optionally comma-separated) list of arguments
+that control which image attributes to output when displaying in table
+or csv format.
+
+Default column layout is: ndu
+
+Column shorthand chars:
+n - Profile Name
+d - Description
+u - Used By`))
 
 	cmd.RunE = c.Run
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", defaultProfileColumns, i18n.G("Columns")+"``")
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
+	cmd.Flags().BoolVar(&c.flagAllProjects, "all-projects", false, i18n.G("Display profiles from all projects"))
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpRemotes(toComplete, false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
+}
+
+const defaultProfileColumns = "ndu"
+const defaultProfileColumnsAllProjects = "endu"
+
+func (c *cmdProfileList) parseColumns() ([]profileColumn, error) {
+	columnsShorthandMap := map[rune]profileColumn{
+		'n': {i18n.G("NAME"), c.profileNameColumnData},
+		'e': {i18n.G("PROJECT"), c.projectNameColumnData},
+		'd': {i18n.G("DESCRIPTION"), c.descriptionColumnData},
+		'u': {i18n.G("USED BY"), c.usedByColumnData},
+	}
+
+	// Add project column if --all-projects flag specified and no custom column was passed.
+	if c.flagAllProjects {
+		if c.flagColumns == defaultProfileColumns {
+			c.flagColumns = defaultProfileColumnsAllProjects
+		}
+	}
+
+	columnList := strings.Split(c.flagColumns, ",")
+	columns := []profileColumn{}
+
+	for _, columnEntry := range columnList {
+		if columnEntry == "" {
+			return nil, fmt.Errorf(i18n.G("Empty column entry (redundant, leading or trailing command) in '%s'"), c.flagColumns)
+		}
+
+		for _, columnRune := range columnEntry {
+			column, ok := columnsShorthandMap[columnRune]
+			if !ok {
+				return nil, fmt.Errorf(i18n.G("Unknown column shorthand char '%c' in '%s'"), columnRune, columnEntry)
+			}
+
+			columns = append(columns, column)
+		}
+	}
+
+	return columns, nil
+}
+
+func (c *cmdProfileList) profileNameColumnData(profile api.Profile) string {
+	return profile.Name
+}
+
+func (c *cmdProfileList) descriptionColumnData(profile api.Profile) string {
+	return profile.Description
+}
+
+func (c *cmdProfileList) projectNameColumnData(profile api.Profile) string {
+	return profile.Project
+}
+
+func (c *cmdProfileList) usedByColumnData(profile api.Profile) string {
+	return fmt.Sprintf("%d", len(profile.UsedBy))
 }
 
 func (c *cmdProfileList) Run(cmd *cobra.Command, args []string) error {
@@ -624,6 +809,10 @@ func (c *cmdProfileList) Run(cmd *cobra.Command, args []string) error {
 	exit, err := c.global.CheckArgs(cmd, args, 0, 1)
 	if exit {
 		return err
+	}
+
+	if c.global.flagProject != "" && c.flagAllProjects {
+		return fmt.Errorf(i18n.G("Can't specify --project with --all-projects"))
 	}
 
 	// Parse remote
@@ -640,25 +829,42 @@ func (c *cmdProfileList) Run(cmd *cobra.Command, args []string) error {
 	resource := resources[0]
 
 	// List profiles
-	profiles, err := resource.server.GetProfiles()
+	var profiles []api.Profile
+	if c.flagAllProjects {
+		profiles, err = resource.server.GetProfilesAllProjects()
+		if err != nil {
+			return err
+		}
+	} else {
+		profiles, err = resource.server.GetProfiles()
+		if err != nil {
+			return err
+		}
+	}
+
+	columns, err := c.parseColumns()
 	if err != nil {
 		return err
 	}
 
 	data := [][]string{}
 	for _, profile := range profiles {
-		strUsedBy := fmt.Sprintf("%d", len(profile.UsedBy))
-		data = append(data, []string{profile.Name, profile.Description, strUsedBy})
+		line := []string{}
+		for _, column := range columns {
+			line = append(line, column.Data(profile))
+		}
+
+		data = append(data, line)
 	}
 
 	sort.Sort(cli.SortColumnsNaturally(data))
 
-	header := []string{
-		i18n.G("NAME"),
-		i18n.G("DESCRIPTION"),
-		i18n.G("USED BY")}
+	header := []string{}
+	for _, column := range columns {
+		header = append(header, column.Name)
+	}
 
-	return cli.RenderTable(c.flagFormat, header, data, profiles)
+	return cli.RenderTable(os.Stdout, c.flagFormat, header, data, profiles)
 }
 
 // Remove.
@@ -675,6 +881,18 @@ func (c *cmdProfileRemove) Command() *cobra.Command {
 		`Remove profiles from instances`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpProfiles(args[0], false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -704,7 +922,7 @@ func (c *cmdProfileRemove) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if !shared.StringInSlice(args[1], inst.Profiles) {
+	if !slices.Contains(inst.Profiles, args[1]) {
 		return fmt.Errorf(i18n.G("Profile %s isn't currently applied to %s"), args[1], resource.name)
 	}
 
@@ -751,6 +969,14 @@ func (c *cmdProfileRename) Command() *cobra.Command {
 		`Rename profiles`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpProfiles(toComplete, true)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -807,6 +1033,19 @@ For backward compatibility, a single configuration key may still be set with:
 
 	cmd.RunE = c.Run
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Set the key as a profile property"))
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpProfiles(toComplete, true)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpInstanceAllKeys()
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -880,6 +1119,14 @@ func (c *cmdProfileShow) Command() *cobra.Command {
 
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpProfiles(toComplete, true)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -936,6 +1183,18 @@ func (c *cmdProfileUnset) Command() *cobra.Command {
 
 	cmd.RunE = c.Run
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Unset the key as a profile property"))
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpProfiles(toComplete, true)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpProfileConfigs(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }

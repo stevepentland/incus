@@ -3,6 +3,7 @@ package incus
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,8 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/logger"
+	"github.com/lxc/incus/v6/shared/subprocess"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 // Image handling functions
@@ -21,6 +24,11 @@ import (
 // GetImages returns a list of available images as Image structs.
 func (r *ProtocolSimpleStreams) GetImages() ([]api.Image, error) {
 	return r.ssClient.ListImages()
+}
+
+// GetImagesAllProjects returns a list of available images as Image structs.
+func (r *ProtocolSimpleStreams) GetImagesAllProjects() ([]api.Image, error) {
+	return r.GetImages()
 }
 
 // GetImageFingerprints returns a list of available image fingerprints.
@@ -63,7 +71,7 @@ func (r *ProtocolSimpleStreams) GetImageFile(fingerprint string, req ImageFileRe
 	}
 
 	// Attempt to download from host
-	if shared.PathExists("/dev/incus/sock") && os.Geteuid() == 0 {
+	if util.PathExists("/dev/incus/sock") && os.Geteuid() == 0 {
 		unixURI := fmt.Sprintf("http://unix.socket/1.0/images/%s/export", url.PathEscape(fingerprint))
 
 		// Setup the HTTP client
@@ -95,12 +103,12 @@ func (r *ProtocolSimpleStreams) GetImageFile(fingerprint string, req ImageFileRe
 	// Download function
 	download := func(path string, filename string, hash string, target io.WriteSeeker) (int64, error) {
 		// Try over http
-		url, err := shared.JoinUrls(fmt.Sprintf("http://%s", strings.TrimPrefix(r.httpHost, "https://")), path)
+		uri, err := url.JoinPath(fmt.Sprintf("http://%s", strings.TrimPrefix(r.httpHost, "https://")), path)
 		if err != nil {
 			return -1, err
 		}
 
-		size, err := shared.DownloadFileHash(context.TODO(), &httpClient, r.httpUserAgent, req.ProgressHandler, req.Canceler, filename, url, hash, sha256.New(), target)
+		size, err := util.DownloadFileHash(context.TODO(), &httpClient, r.httpUserAgent, req.ProgressHandler, req.Canceler, filename, uri, hash, sha256.New(), target)
 		if err != nil {
 			// Handle cancelation
 			if err.Error() == "net/http: request canceled" {
@@ -108,13 +116,18 @@ func (r *ProtocolSimpleStreams) GetImageFile(fingerprint string, req ImageFileRe
 			}
 
 			// Try over https
-			url, err := shared.JoinUrls(r.httpHost, path)
+			uri, err := url.JoinPath(r.httpHost, path)
 			if err != nil {
 				return -1, err
 			}
 
-			size, err = shared.DownloadFileHash(context.TODO(), &httpClient, r.httpUserAgent, req.ProgressHandler, req.Canceler, filename, url, hash, sha256.New(), target)
+			size, err = util.DownloadFileHash(context.TODO(), &httpClient, r.httpUserAgent, req.ProgressHandler, req.Canceler, filename, uri, hash, sha256.New(), target)
 			if err != nil {
+				if errors.Is(err, util.ErrNotFound) {
+					logger.Info("Unable to download file by hash, invalidate potentially outdated cache", logger.Ctx{"filename": filename, "uri": uri, "hash": hash})
+					r.ssClient.InvalidateCache()
+				}
+
 				return -1, err
 			}
 		}
@@ -143,12 +156,12 @@ func (r *ProtocolSimpleStreams) GetImageFile(fingerprint string, req ImageFileRe
 		_, err := exec.LookPath("xdelta3")
 		if err == nil && req.DeltaSourceRetriever != nil {
 			for filename, file := range files {
-				if !strings.HasPrefix(filename, "root.delta-") {
+				_, srcFingerprint, prefixFound := strings.Cut(filename, "root.delta-")
+				if !prefixFound {
 					continue
 				}
 
 				// Check if we have the source file for the delta
-				srcFingerprint := strings.Split(filename, "root.delta-")[1]
 				srcPath := req.DeltaSourceRetriever(srcFingerprint, "rootfs")
 				if srcPath == "" {
 					continue
@@ -181,7 +194,7 @@ func (r *ProtocolSimpleStreams) GetImageFile(fingerprint string, req ImageFileRe
 				defer func() { _ = os.Remove(patchedFile.Name()) }()
 
 				// Apply it
-				_, err = shared.RunCommand("xdelta3", "-f", "-d", "-s", srcPath, deltaFile.Name(), patchedFile.Name())
+				_, err = subprocess.RunCommand("xdelta3", "-f", "-d", "-s", srcPath, deltaFile.Name(), patchedFile.Name())
 				if err != nil {
 					return nil, err
 				}

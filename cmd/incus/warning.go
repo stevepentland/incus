@@ -2,15 +2,16 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	yaml "gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
 )
 
 type warningColumn struct {
@@ -28,6 +29,7 @@ func (c *cmdWarning) Command() *cobra.Command {
 	cmd.Short = i18n.G("Manage warnings")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
 		`Manage warnings`))
+	cmd.Hidden = true
 
 	// List
 	warningListCmd := cmdWarningList{global: c.global, warning: c}
@@ -90,8 +92,12 @@ Column shorthand chars:
     t - Type`))
 
 	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", defaultWarningColumns, i18n.G("Columns")+"``")
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
 	cmd.Flags().BoolVarP(&c.flagAll, "all", "a", false, i18n.G("List all warnings")+"``")
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
 
 	cmd.RunE = c.Run
 
@@ -165,7 +171,7 @@ func (c *cmdWarningList) Run(cmd *cobra.Command, args []string) error {
 		headers = append(headers, column.Name)
 	}
 
-	return cli.RenderTable(c.flagFormat, headers, data, rawData)
+	return cli.RenderTable(os.Stdout, c.flagFormat, headers, data, rawData)
 }
 
 func (c *cmdWarningList) countColumnData(warning api.Warning) string {
@@ -173,11 +179,11 @@ func (c *cmdWarningList) countColumnData(warning api.Warning) string {
 }
 
 func (c *cmdWarningList) firstSeenColumnData(warning api.Warning) string {
-	return warning.FirstSeenAt.UTC().Format("Jan 2, 2006 at 3:04pm (MST)")
+	return warning.FirstSeenAt.Local().Format(dateLayout)
 }
 
 func (c *cmdWarningList) lastSeenColumnData(warning api.Warning) string {
-	return warning.LastSeenAt.UTC().Format("Jan 2, 2006 at 3:04pm (MST)")
+	return warning.LastSeenAt.Local().Format(dateLayout)
 }
 
 func (c *cmdWarningList) locationColumnData(warning api.Warning) string {
@@ -192,7 +198,7 @@ func (c *cmdWarningList) severityColumnData(warning api.Warning) string {
 	return strings.ToUpper(warning.Severity)
 }
 
-func (c *cmdWarningList) statusColumnData(warning api.Warning) string {
+func (c *cmdWarningList) stateColumnData(warning api.Warning) string {
 	return strings.ToUpper(warning.Status)
 }
 
@@ -211,7 +217,7 @@ func (c *cmdWarningList) parseColumns(clustered bool) ([]warningColumn, error) {
 		'l': {i18n.G("LAST SEEN"), c.lastSeenColumnData},
 		'p': {i18n.G("PROJECT"), c.projectColumnData},
 		's': {i18n.G("SEVERITY"), c.severityColumnData},
-		'S': {i18n.G("STATUS"), c.statusColumnData},
+		'S': {i18n.G("STATE"), c.stateColumnData},
 		't': {i18n.G("TYPE"), c.typeColumnData},
 		'u': {i18n.G("UUID"), c.uuidColumnData},
 	}

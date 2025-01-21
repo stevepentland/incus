@@ -49,6 +49,12 @@ type InstancesPost struct {
 	// Type (container or virtual-machine)
 	// Example: container
 	Type InstanceType `json:"type" yaml:"type"`
+
+	// Whether to start the instance after creation
+	// Example: true
+	//
+	// API extension: instance_create_start
+	Start bool `json:"start" yaml:"start"`
 }
 
 // InstancesPut represents the fields available for a mass update.
@@ -103,6 +109,24 @@ type InstancePost struct {
 	//
 	// API extension: instance_allow_inconsistent_copy
 	AllowInconsistent bool `json:"allow_inconsistent" yaml:"allow_inconsistent"`
+
+	// Instance configuration file.
+	// Example: {"security.nesting": "true"}
+	//
+	// API extension: instance_move_config
+	Config map[string]string
+
+	// Instance devices.
+	// Example: {"root": {"type": "disk", "pool": "default", "path": "/"}}
+	//
+	// API extension: instance_move_config
+	Devices map[string]map[string]string
+
+	// List of profiles applied to the instance.
+	// Example: ["default"]
+	//
+	// API extension: instance_move_config
+	Profiles []string
 }
 
 // InstancePostTarget represents the migration target host and operation.
@@ -337,6 +361,12 @@ type InstanceSource struct {
 	// Whether this is refreshing an existing instance (for migration and copy)
 	// Example: false
 	Refresh bool `json:"refresh,omitempty" yaml:"refresh,omitempty"`
+
+	// Whether to exclude source snapshots earlier than latest target snapshot
+	// Example: false
+	//
+	// API extension: custom_volume_refresh_exclude_older_snapshots
+	RefreshExcludeOlder bool `json:"refresh_exclude_older,omitempty" yaml:"refresh_exclude_older,omitempty"`
 
 	// Source project name (for copy and local image)
 	// Example: blah

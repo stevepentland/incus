@@ -13,11 +13,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zitadel/oidc/v2/pkg/client/rp"
-	httphelper "github.com/zitadel/oidc/v2/pkg/http"
-	"github.com/zitadel/oidc/v2/pkg/oidc"
+	"github.com/gorilla/websocket"
+	"github.com/zitadel/oidc/v3/pkg/client/rp"
+	httphelper "github.com/zitadel/oidc/v3/pkg/http"
+	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"golang.org/x/oauth2"
+
+	"github.com/lxc/incus/v6/shared/util"
 )
+
+// ErrOIDCExpired is returned when the token is expired and we can't retry the request ourselves.
+var ErrOIDCExpired = fmt.Errorf("OIDC token expired, please re-try the request")
 
 // setupOIDCClient initializes the OIDC (OpenID Connect) client with given tokens if it hasn't been set up already.
 // It also assigns the protocol's http client to the oidcClient's httpClient.
@@ -28,6 +34,17 @@ func (r *ProtocolIncus) setupOIDCClient(token *oidc.Tokens[*oidc.IDTokenClaims])
 
 	r.oidcClient = newOIDCClient(token)
 	r.oidcClient.httpClient = r.http
+}
+
+// GetOIDCTokens returns the current OIDC tokens (if any) from the OIDC client.
+//
+// This should only be used by internal Incus tools when it's not possible to get the tokens from a Config struct.
+func (r *ProtocolIncus) GetOIDCTokens() *oidc.Tokens[*oidc.IDTokenClaims] {
+	if r.oidcClient == nil {
+		return nil
+	}
+
+	return r.oidcClient.tokens
 }
 
 // Custom transport that modifies requests to inject the audience field.
@@ -114,6 +131,11 @@ func (o *oidcClient) do(req *http.Request) (*http.Response, error) {
 	clientID := resp.Header.Get("X-Incus-OIDC-clientid")
 	audience := resp.Header.Get("X-Incus-OIDC-audience")
 
+	if issuer == "" || clientID == "" {
+		return resp, nil
+	}
+
+	// Refresh the token.
 	err = o.refresh(issuer, clientID)
 	if err != nil {
 		err = o.authenticate(issuer, clientID, audience)
@@ -122,8 +144,23 @@ func (o *oidcClient) do(req *http.Request) (*http.Response, error) {
 		}
 	}
 
+	// If not dealing with something we can retry, return a clear error.
+	if req.Method != "GET" && req.GetBody == nil {
+		return resp, ErrOIDCExpired
+	}
+
 	// Set the new access token in the header.
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", o.tokens.AccessToken))
+
+	// Reset the request body.
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+
+		req.Body = body
+	}
 
 	resp, err = o.httpClient.Do(req)
 	if err != nil {
@@ -131,6 +168,40 @@ func (o *oidcClient) do(req *http.Request) (*http.Response, error) {
 	}
 
 	return resp, nil
+}
+
+// dial function executes a websocket request and handles OIDC authentication and refresh.
+func (o *oidcClient) dial(dialer websocket.Dialer, uri string, req *http.Request) (*websocket.Conn, *http.Response, error) {
+	conn, resp, err := dialer.Dial(uri, req.Header)
+	if err != nil && resp == nil {
+		return nil, nil, err
+	}
+
+	// Return immediately if the error is not HTTP status unauthorized.
+	if conn != nil && resp.StatusCode != http.StatusUnauthorized {
+		return conn, resp, nil
+	}
+
+	issuer := resp.Header.Get("X-Incus-OIDC-issuer")
+	clientID := resp.Header.Get("X-Incus-OIDC-clientid")
+	audience := resp.Header.Get("X-Incus-OIDC-audience")
+
+	if issuer == "" || clientID == "" {
+		return nil, resp, err
+	}
+
+	err = o.refresh(issuer, clientID)
+	if err != nil {
+		err = o.authenticate(issuer, clientID, audience)
+		if err != nil {
+			return nil, resp, err
+		}
+	}
+
+	// Set the new access token in the header.
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", o.tokens.AccessToken))
+
+	return dialer.Dial(uri, req.Header)
 }
 
 // getProvider initializes a new OpenID Connect Relying Party for a given issuer and clientID.
@@ -157,7 +228,7 @@ func (o *oidcClient) getProvider(issuer string, clientID string) (rp.RelyingPart
 		rp.WithHTTPClient(o.httpClient),
 	}
 
-	provider, err := rp.NewRelyingPartyOIDC(issuer, clientID, "", "", oidcScopes, options...)
+	provider, err := rp.NewRelyingPartyOIDC(context.TODO(), issuer, clientID, "", "", oidcScopes, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -177,7 +248,7 @@ func (o *oidcClient) refresh(issuer string, clientID string) error {
 		return errRefreshAccessToken
 	}
 
-	oauthTokens, err := rp.RefreshAccessToken(provider, o.tokens.RefreshToken, "", "")
+	oauthTokens, err := rp.RefreshTokens[*oidc.IDTokenClaims](context.TODO(), provider, o.tokens.RefreshToken, "", "")
 	if err != nil {
 		return errRefreshAccessToken
 	}
@@ -213,19 +284,17 @@ func (o *oidcClient) authenticate(issuer string, clientID string, audience strin
 
 	o.oidcTransport.deviceAuthorizationEndpoint = provider.GetDeviceAuthorizationEndpoint()
 
-	resp, err := rp.DeviceAuthorization(oidcScopes, provider)
+	resp, err := rp.DeviceAuthorization(context.TODO(), oidcScopes, provider, nil)
 	if err != nil {
 		return err
 	}
-
-	fmt.Printf("Code: %s\n\n", resp.UserCode)
 
 	u, _ := url.Parse(resp.VerificationURIComplete)
 
-	err = openBrowser(u.String())
-	if err != nil {
-		return err
-	}
+	fmt.Printf("URL: %s\n", u.String())
+	fmt.Printf("Code: %s\n\n", resp.UserCode)
+
+	_ = util.OpenBrowser(u.String())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT)
 	defer stop()

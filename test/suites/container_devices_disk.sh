@@ -4,6 +4,8 @@ test_container_devices_disk() {
 
   incus init testimage foo
 
+  test_container_devices_disk_shift
+  test_container_devices_disk_subpath
   test_container_devices_raw_mount_options
   test_container_devices_disk_ceph
   test_container_devices_disk_cephfs
@@ -11,6 +13,84 @@ test_container_devices_disk() {
   test_container_devices_disk_char
 
   incus delete -f foo
+}
+
+test_container_devices_disk_shift() {
+  # shellcheck disable=2039,3043
+  local incus_backend
+  incus_backend=$(storage_backend "$INCUS_DIR")
+
+  if [ -n "${INCUS_IDMAPPED_MOUNTS_DISABLE:-}" ]; then
+    return
+  fi
+
+  if [ "${incus_backend}" = "zfs" ]; then
+    # ZFS 2.2 is required for idmapped mounts support.
+    zfs_version=$(zfs --version | grep -m 1 '^zfs-' | cut -d '-' -f 2)
+    if [ "$(printf '%s\n' "$zfs_version" "2.2" | sort -V | head -n1)" = "$zfs_version" ]; then
+      if [ "$zfs_version" != "2.2" ]; then
+        echo "ZFS version is less than 2.2. Skipping idmapped mounts tests."
+        return
+      else
+        echo "ZFS version is 2.2. Idmapped mounts are supported with ZFS."
+      fi
+    else
+      echo "ZFS version is greater than 2.2. Idmapped mounts are supported with ZFS."
+    fi
+  fi
+
+  # Test basic shifting
+  mkdir -p "${TEST_DIR}/shift-source"
+  touch "${TEST_DIR}/shift-source/a"
+  chown 123:456 "${TEST_DIR}/shift-source/a"
+
+  incus start foo
+  incus config device add foo idmapped_mount disk source="${TEST_DIR}/shift-source" path=/mnt
+  [ "$(incus exec foo -- stat /mnt/a -c '%u:%g')" = "65534:65534" ] || false
+  incus config device remove foo idmapped_mount
+
+  incus config device add foo idmapped_mount disk source="${TEST_DIR}/shift-source" path=/mnt shift=true
+  [ "$(incus exec foo -- stat /mnt/a -c '%u:%g')" = "123:456" ] || false
+
+  incus stop foo -f
+  incus start foo
+  [ "$(incus exec foo -- stat /mnt/a -c '%u:%g')" = "123:456" ] || false
+  incus config device remove foo idmapped_mount
+  incus stop foo -f
+
+  # Test shifted custom volumes
+  POOL=$(incus profile device get default root pool)
+
+  # Cannot set both security.shifted and security.unmapped.
+  ! incus storage volume create "${POOL}" foo-shift security.shifted=true security.unmapped=true || false
+
+  incus storage volume create "${POOL}" foo-shift security.shifted=true
+
+  # Cannot set both security.shifted and security.unmapped.
+  ! incus storage volume set "${POOL}" foo-shift security.unmapped=true || false
+
+  incus start foo
+  incus launch testimage foo-priv -c security.privileged=true
+  incus launch testimage foo-isol1 -c security.idmap.isolated=true
+  incus launch testimage foo-isol2 -c security.idmap.isolated=true
+
+  incus config device add foo shifted disk pool="${POOL}" source=foo-shift path=/mnt
+  incus config device add foo-priv shifted disk pool="${POOL}" source=foo-shift path=/mnt
+  incus config device add foo-isol1 shifted disk pool="${POOL}" source=foo-shift path=/mnt
+  incus config device add foo-isol2 shifted disk pool="${POOL}" source=foo-shift path=/mnt
+
+  incus exec foo -- touch /mnt/a
+  incus exec foo -- chown 123:456 /mnt/a
+
+  [ "$(incus exec foo -- stat /mnt/a -c '%u:%g')" = "123:456" ] || false
+  [ "$(incus exec foo-priv -- stat /mnt/a -c '%u:%g')" = "123:456" ] || false
+  [ "$(incus exec foo-isol1 -- stat /mnt/a -c '%u:%g')" = "123:456" ] || false
+  [ "$(incus exec foo-isol2 -- stat /mnt/a -c '%u:%g')" = "123:456" ] || false
+
+  incus delete -f foo-priv foo-isol1 foo-isol2
+  incus config device remove foo shifted
+  incus storage volume delete "${POOL}" foo-shift
+  incus stop foo -f
 }
 
 test_container_devices_raw_mount_options() {
@@ -102,4 +182,47 @@ test_container_devices_disk_char() {
   [ "$(incus exec foo -- stat /root/zero -c '%F')" = "character special file" ] || false
   incus config device remove foo char
   incus stop foo -f
+}
+
+test_container_devices_disk_subpath() {
+  POOL=$(incus profile device get default root pool)
+
+  # Create a test volume and main container
+  incus storage volume create "${POOL}" foo
+  incus launch testimage foo-main
+  incus config device add foo-main foo disk pool="${POOL}" source=foo path=/foo
+
+  # Create some entries
+  incus exec foo-main -- mkdir /foo/path1 /foo/path2
+  incus exec foo-main -- ln -s /etc /foo/path3
+  incus exec foo-main -- ln -s path1 /foo/path4
+  echo path1 | incus file push - foo-main/foo/path1/hello
+  echo path2 | incus file push - foo-main/foo/path2/hello
+
+  # Create some test containers
+  incus create testimage foo-path1
+  incus config device add foo-path1 foo disk pool="${POOL}" source=foo/path1 path=/foo
+
+  incus create testimage foo-path2
+  incus config device add foo-path2 foo disk pool="${POOL}" source=foo/path2 path=/foo
+
+  incus create testimage foo-path3
+  incus config device add foo-path3 foo disk pool="${POOL}" source=foo/path3 path=/foo
+
+  incus create testimage foo-path4
+  incus config device add foo-path4 foo disk pool="${POOL}" source=foo/path4 path=/foo
+
+  # Validation
+  incus start foo-path1
+  incus start foo-path2
+  ! incus start foo-path3 || false
+  incus start foo-path4
+
+  [ "$(incus file pull foo-path1/foo/hello -)" = "path1" ]
+  [ "$(incus file pull foo-path2/foo/hello -)" = "path2" ]
+  [ "$(incus file pull foo-path4/foo/hello -)" = "path1" ]
+
+  # Cleanup
+  incus delete -f foo-main foo-path1 foo-path2 foo-path3 foo-path4
+  incus storage volume delete "${POOL}" foo
 }

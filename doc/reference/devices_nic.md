@@ -1,10 +1,6 @@
 (devices-nic)=
 # Type: `nic`
 
-```{youtube} https://www.youtube.com/watch?v=W62eno28KMY
-   :title: LXD NIC devices
-```
-
 ```{note}
 The `nic` device type is supported for both containers and VMs.
 
@@ -12,7 +8,7 @@ NICs support hotplugging for both containers and VMs (with the exception of the 
 ```
 
 Network devices, also referred to as *Network Interface Controllers* or *NICs*, supply a connection to a network.
-LXD supports several different types of network devices (*NIC types*).
+Incus supports several different types of network devices (*NIC types*).
 
 ## `nictype` vs. `network`
 
@@ -22,16 +18,16 @@ These two device options are mutually exclusive, and you can specify only one of
 However, note that when you specify the `network` option, the `nictype` option is derived automatically from the network type.
 
 `nictype`
-: When using the `nictype` device option, you can specify a network interface that is not controlled by LXD.
-  Therefore, you must specify all information that LXD needs to use the network interface.
+: When using the `nictype` device option, you can specify a network interface that is not controlled by Incus.
+  Therefore, you must specify all information that Incus needs to use the network interface.
 
   When using this method, the `nictype` option must be specified when creating the device, and it cannot be changed later.
 
 `network`
 : When using the `network` device option, the NIC is linked to an existing {ref}`managed network <managed-networks>`.
-  In this case, LXD has all required information about the network, and you need to specify only the network name when adding the device.
+  In this case, Incus has all required information about the network, and you need to specify only the network name when adding the device.
 
-  When using this method, LXD derives the `nictype` option automatically.
+  When using this method, Incus derives the `nictype` option automatically.
   The value is read-only and cannot be changed.
 
   Other device options that are inherited from the network are marked with a "yes" in the "Managed" column of the NIC-specific tables of device options.
@@ -74,31 +70,37 @@ A `bridged` NIC uses an existing bridge on the host and creates a virtual device
 
 NIC devices of type `bridged` have the following device options:
 
-Key                      | Type    | Default           | Managed | Description
-:--                      | :--     | :--               | :--     | :--
-`boot.priority`          | integer | -                 | no      | Boot priority for VMs (higher value boots first)
-`host_name`              | string  | randomly assigned | no      | The name of the interface inside the host
-`hwaddr`                 | string  | randomly assigned | no      | The MAC address of the new interface
-`ipv4.address`           | string  | -                 | no      | An IPv4 address to assign to the instance through DHCP (can be `none` to restrict all IPv4 traffic when `security.ipv4_filtering` is set)
-`ipv4.routes`            | string  | -                 | no      | Comma-delimited list of IPv4 static routes to add on host to NIC
-`ipv4.routes.external`   | string  | -                 | no      | Comma-delimited list of IPv4 static routes to route to the NIC and publish on uplink network (BGP)
-`ipv6.address`           | string  | -                 | no      | An IPv6 address to assign to the instance through DHCP (can be `none` to restrict all IPv6 traffic when `security.ipv6_filtering` is set)
-`ipv6.routes`            | string  | -                 | no      | Comma-delimited list of IPv6 static routes to add on host to NIC
-`ipv6.routes.external`   | string  | -                 | no      | Comma-delimited list of IPv6 static routes to route to the NIC and publish on uplink network (BGP)
-`limits.egress`          | string  | -                 | no      | I/O limit in bit/s for outgoing traffic (various suffixes supported, see {ref}`instances-limit-units`)
-`limits.ingress`         | string  | -                 | no      | I/O limit in bit/s for incoming traffic (various suffixes supported, see {ref}`instances-limit-units`)
-`limits.max`             | string  | -                 | no      | I/O limit in bit/s for both incoming and outgoing traffic (same as setting both `limits.ingress` and `limits.egress`)
-`mtu`                    | integer | parent MTU        | yes     | The MTU of the new interface
-`name`                   | string  | kernel assigned   | no      | The name of the interface inside the instance
-`network`                | string  | -                 | no      | The managed network to link the device to (instead of specifying the `nictype` directly)
-`parent`                 | string  | -                 | yes     | The name of the host device (required if specifying the `nictype` directly)
-`queue.tx.length`        | integer | -                 | no      | The transmit queue length for the NIC
-`security.ipv4_filtering`| bool    | `false`           | no      | Prevent the instance from spoofing another instance's IPv4 address (enables `security.mac_filtering`)
-`security.ipv6_filtering`| bool    | `false`           | no      | Prevent the instance from spoofing another instance's IPv6 address (enables `security.mac_filtering`)
-`security.mac_filtering` | bool    | `false`           | no      | Prevent the instance from spoofing another instance's MAC address
-`security.port_isolation`| bool    | `false`           | no      | Prevent the NIC from communicating with other NICs in the network that have port isolation enabled
-`vlan`                   | integer | -                 | no      | The VLAN ID to use for non-tagged traffic (can be `none` to remove port from default VLAN)
-`vlan.tagged`            | integer | -                 | no      | Comma-delimited list of VLAN IDs or VLAN ranges to join for tagged traffic
+Key                                   | Type    | Default           | Managed | Description
+:--                                   | :--     | :--               | :--     | :--
+`boot.priority`                       | integer | -                 | no      | Boot priority for VMs (higher value boots first)
+`host_name`                           | string  | randomly assigned | no      | The name of the interface inside the host
+`hwaddr`                              | string  | randomly assigned | no      | The MAC address of the new interface
+`ipv4.address`                        | string  | -                 | no      | An IPv4 address to assign to the instance through DHCP (can be `none` to restrict all IPv4 traffic when `security.ipv4_filtering` is set)
+`ipv4.routes`                         | string  | -                 | no      | Comma-delimited list of IPv4 static routes to add on host to NIC
+`ipv4.routes.external`                | string  | -                 | no      | Comma-delimited list of IPv4 static routes to route to the NIC and publish on uplink network (BGP)
+`ipv6.address`                        | string  | -                 | no      | An IPv6 address to assign to the instance through DHCP (can be `none` to restrict all IPv6 traffic when `security.ipv6_filtering` is set)
+`ipv6.routes`                         | string  | -                 | no      | Comma-delimited list of IPv6 static routes to add on host to NIC
+`ipv6.routes.external`                | string  | -                 | no      | Comma-delimited list of IPv6 static routes to route to the NIC and publish on uplink network (BGP)
+`limits.egress`                       | string  | -                 | no      | I/O limit in bit/s for outgoing traffic (various suffixes supported, see {ref}`instances-limit-units`)
+`limits.ingress`                      | string  | -                 | no      | I/O limit in bit/s for incoming traffic (various suffixes supported, see {ref}`instances-limit-units`)
+`limits.max`                          | string  | -                 | no      | I/O limit in bit/s for both incoming and outgoing traffic (same as setting both `limits.ingress` and `limits.egress`)
+`limits.priority`                     | integer | -                 | no      | The `skb->priority` value (32-bit unsigned integer) for outgoing traffic, to be used by the kernel queuing discipline (qdisc) to prioritize network packets (The effect of this value depends on the particular qdisc implementation, for example, `SKBPRIO` or `QFQ`. Consult the kernel qdisc documentation before setting this value.)
+`mtu`                                 | integer | parent MTU        | yes     | The MTU of the new interface
+`name`                                | string  | kernel assigned   | no      | The name of the interface inside the instance
+`network`                             | string  | -                 | no      | The managed network to link the device to (instead of specifying the `nictype` directly)
+`parent`                              | string  | -                 | yes     | The name of the host device (required if specifying the `nictype` directly)
+`queue.tx.length`                     | integer | -                 | no      | The transmit queue length for the NIC
+`security.acls`                       | string  | -                 | no      | Comma-separated list of network ACLs to apply
+`security.acls.default.egress.action` | string  | `drop`            | no      | Action to use for egress traffic that doesn't match any ACL rule
+`security.acls.default.egress.logged` | bool    | `false`           | no      | Whether to log egress traffic that doesn't match any ACL rule
+`security.acls.default.ingress.action`| string  | `drop`            | no      | Action to use for ingress traffic that doesn't match any ACL rule
+`security.acls.default.ingress.logged`| bool    | `false`           | no      | Whether to log ingress traffic that doesn't match any ACL rule
+`security.ipv4_filtering`             | bool    | `false`           | no      | Prevent the instance from spoofing another instance's IPv4 address (enables `security.mac_filtering`)
+`security.ipv6_filtering`             | bool    | `false`           | no      | Prevent the instance from spoofing another instance's IPv6 address (enables `security.mac_filtering`)
+`security.mac_filtering`              | bool    | `false`           | no      | Prevent the instance from spoofing another instance's MAC address
+`security.port_isolation`             | bool    | `false`           | no      | Prevent the NIC from communicating with other NICs in the network that have port isolation enabled
+`vlan`                                | integer | -                 | no      | The VLAN ID to use for non-tagged traffic (can be `none` to remove port from default VLAN)
+`vlan.tagged`                         | integer | -                 | no      | Comma-delimited list of VLAN IDs or VLAN ranges to join for tagged traffic
 
 (nic-macvlan)=
 ### `nictype`: `macvlan`
@@ -109,7 +111,7 @@ You can select this NIC type through the `nictype` option or the `network` optio
 
 A `macvlan` NIC sets up a new network device based on an existing one, but using a different MAC address.
 
-If you are using a `macvlan` NIC, communication between the LXD host and the instances is not possible.
+If you are using a `macvlan` NIC, communication between the Incus host and the instances is not possible.
 Both the host and the instances can talk to the gateway, but they cannot communicate directly.
 
 #### Device options
@@ -121,6 +123,7 @@ Key                     | Type    | Default           | Managed | Description
 `boot.priority`         | integer | -                 | no      | Boot priority for VMs (higher value boots first)
 `gvrp`                  | bool    | `false`           | no      | Register VLAN using GARP VLAN Registration Protocol
 `hwaddr`                | string  | randomly assigned | no      | The MAC address of the new interface
+`mode`                  | string  | `bridge`          | no      | Macvlan mode (one of `bridge`, `vepa`, `passthru` or `private`)
 `mtu`                   | integer | parent MTU        | yes     | The MTU of the new interface
 `name`                  | string  | kernel assigned   | no      | The name of the interface inside the instance
 `network`               | string  | -                 | no      | The managed network to link the device to (instead of specifying the `nictype` directly)
@@ -145,14 +148,14 @@ Given that VFs appear as regular PCIe devices to the system, they can be passed 
 
 VF allocation
 : The `sriov` interface type expects to be passed the name of an SR-IOV enabled network device on the system via the `parent` property.
-  LXD then checks for any available VFs on the system.
+  Incus then checks for any available VFs on the system.
 
-  By default, LXD allocates the first free VF it finds.
+  By default, Incus allocates the first free VF it finds.
   If it detects that either none are enabled or all currently enabled VFs are in use, it bumps the number of supported VFs to the maximum value and uses the first free VF.
-  If all possible VFs are in use or the kernel or card doesn't support incrementing the number of VFs, LXD returns an error.
+  If all possible VFs are in use or the kernel or card doesn't support incrementing the number of VFs, Incus returns an error.
 
   ```{note}
-  If you need LXD to use a specific VF, use a `physical` NIC instead of a `sriov` NIC and set its `parent` option to the VF name.
+  If you need Incus to use a specific VF, use a `physical` NIC instead of a `sriov` NIC and set its `parent` option to the VF name.
   ```
 
 #### Device options
@@ -181,8 +184,8 @@ An `ovn` NIC uses an existing OVN network and creates a virtual device pair to c
 
 (devices-nic-hw-acceleration)=
 SR-IOV hardware acceleration
-: To use `acceleration=sriov`, you must have a compatible SR-IOV physical NIC that supports the Ethernet switch device driver model (`switchdev`) in your LXD host.
-  LXD assumes that the physical NIC (PF) is configured in `switchdev` mode and connected to the OVN integration OVS bridge, and that it has one or more virtual functions (VFs) active.
+: To use `acceleration=sriov`, you must have a compatible SR-IOV physical NIC that supports the Ethernet switch device driver model (`switchdev`) in your Incus host.
+  Incus assumes that the physical NIC (PF) is configured in `switchdev` mode and connected to the OVN integration OVS bridge, and that it has one or more virtual functions (VFs) active.
 
   To achieve this, follow these basic prerequisite setup steps:
 
@@ -227,10 +230,10 @@ Key                                   | Type    | Default           | Managed | 
 `boot.priority`                       | integer | -                 | no      | Boot priority for VMs (higher value boots first)
 `host_name`                           | string  | randomly assigned | no      | The name of the interface inside the host
 `hwaddr`                              | string  | randomly assigned | no      | The MAC address of the new interface
-`ipv4.address`                        | string  | -                 | no      | An IPv4 address to assign to the instance through DHCP
+`ipv4.address`                        | string  | -                 | no      | An IPv4 address to assign to the instance through DHCP, `none` can be used to disable IP allocation
 `ipv4.routes`                         | string  | -                 | no      | Comma-delimited list of IPv4 static routes to route to the NIC
 `ipv4.routes.external`                | string  | -                 | no      | Comma-delimited list of IPv4 static routes to route to the NIC and publish on uplink network
-`ipv6.address`                        | string  | -                 | no      | An IPv6 address to assign to the instance through DHCP
+`ipv6.address`                        | string  | -                 | no      | An IPv6 address to assign to the instance through DHCP, `none` can be used to disable IP allocation
 `ipv6.routes`                         | string  | -                 | no      | Comma-delimited list of IPv6 static routes to route to the NIC
 `ipv6.routes.external`                | string  | -                 | no      | Comma-delimited list of IPv6 static routes to route to the NIC and publish on uplink network
 `name`                                | string  | kernel assigned   | no      | The name of the interface inside the instance
@@ -241,7 +244,13 @@ Key                                   | Type    | Default           | Managed | 
 `security.acls.default.egress.logged` | bool    | `false`           | no      | Whether to log egress traffic that doesn't match any ACL rule
 `security.acls.default.ingress.action`| string  | `reject`          | no      | Action to use for ingress traffic that doesn't match any ACL rule
 `security.acls.default.ingress.logged`| bool    | `false`           | no      | Whether to log ingress traffic that doesn't match any ACL rule
+`security.promiscuous`                | bool    | `false`           | no      | Have OVN send unknown network traffic to this network interface (required for some nesting cases)
 `vlan`                                | integer | -                 | no      | The VLAN ID to use when nesting (see also `nested`)
+
+```{note}
+Note that using `none` with either `ipv4.address` or `ipv6.address` needs the other protocol to also be disabled.
+There is currently no way for OVN to disable IP allocation just on IPv4 or IPv6.
+```
 
 (nic-physical)=
 ### `nictype`: `physical`
@@ -280,11 +289,11 @@ Key                     | Type    | Default           | Managed | Description
 
 An `ipvlan` NIC sets up a new network device based on an existing one, using the same MAC address but a different IP.
 
-If you are using an `ipvlan` NIC, communication between the LXD host and the instances is not possible.
+If you are using an `ipvlan` NIC, communication between the Incus host and the instances is not possible.
 Both the host and the instances can talk to the gateway, but they cannot communicate directly.
 
-LXD currently supports IPVLAN in L2 and L3S mode.
-In this mode, the gateway is automatically set by LXD, but the IP addresses must be manually specified using the `ipv4.address` and/or `ipv6.address` options before the container is started.
+Incus currently supports IPVLAN in L2 and L3S mode.
+In this mode, the gateway is automatically set by Incus, but the IP addresses must be manually specified using the `ipv4.address` and/or `ipv6.address` options before the container is started.
 
 DNS
 : The name servers must be configured inside the container, because they are not set automatically.
@@ -346,6 +355,7 @@ Key                     | Type    | Default           | Description
 `limits.egress`         | string  | -                 | I/O limit in bit/s for outgoing traffic (various suffixes supported, see {ref}`instances-limit-units`)
 `limits.ingress`        | string  | -                 | I/O limit in bit/s for incoming traffic (various suffixes supported, see {ref}`instances-limit-units`)
 `limits.max`            | string  | -                 | I/O limit in bit/s for both incoming and outgoing traffic (same as setting both `limits.ingress` and `limits.egress`)
+`limits.priority`       | integer | -                 | The `skb->priority` value (32-bit unsigned integer) for outgoing traffic, to be used by the kernel queuing discipline (qdisc) to prioritize network packets (The effect of this value depends on the particular qdisc implementation, for example, `SKBPRIO` or `QFQ`. Consult the kernel qdisc documentation before setting this value.)
 `mtu`                   | integer | kernel assigned   | The MTU of the new interface
 `name`                  | string  | kernel assigned   | The name of the interface inside the instance
 `queue.tx.length`       | integer | -                 | The transmit queue length for the NIC
@@ -373,7 +383,7 @@ IP addresses, gateways and routes
       169.254.0.1
       fe80::1
 
-  For VMs, the gateways must be configured manually or via a mechanism like `cloud-init`.
+  For VMs, the gateways must be configured manually or via a mechanism like `cloud-init` (see the {ref}`how to guide <instances-routed-nic-vm>`).
 
   ```{note}
   If your container image is configured to perform DHCP on the interface, it will likely remove the automatically added configuration.
@@ -392,11 +402,8 @@ Multiple IP addresses
 Parent interface
 : This NIC can operate with and without a `parent` network interface set.
 
-  With the `parent` network interface set, proxy ARP/NDP entries of the instance's IPs are added to the parent interface, which allows the instance to join the parent interface's network at layer 2.
-
-DNS
-: The name servers must be configured inside the instance, because they are not set automatically.
-  To do this, set the following `sysctls`:
+: With the `parent` network interface set, proxy ARP/NDP entries of the instance's IPs are added to the parent interface, which allows the instance to join the parent interface's network at layer 2.
+: To enable this, the following network configuration must be applied on the host via `sysctl`:
 
    - When using IPv4 addresses:
 
@@ -437,6 +444,7 @@ Key                     | Type    | Default           | Description
 `limits.egress`         | string  | -                 | I/O limit in bit/s for outgoing traffic (various suffixes supported, see {ref}`instances-limit-units`)
 `limits.ingress`        | string  | -                 | I/O limit in bit/s for incoming traffic (various suffixes supported, see {ref}`instances-limit-units`)
 `limits.max`            | string  | -                 | I/O limit in bit/s for both incoming and outgoing traffic (same as setting both `limits.ingress` and `limits.egress`)
+`limits.priority`       | integer | -                 | The `skb->priority` value (32-bit unsigned integer) for outgoing traffic, to be used by the kernel queuing discipline (qdisc) to prioritize network packets (The effect of this value depends on the particular qdisc implementation, for example, `SKBPRIO` or `QFQ`. Consult the kernel qdisc documentation before setting this value.)
 `mtu`                   | integer | parent MTU        | The MTU of the new interface
 `name`                  | string  | kernel assigned   | The name of the interface inside the instance
 `parent`                | string  | -                 | The name of the host device to join the instance to

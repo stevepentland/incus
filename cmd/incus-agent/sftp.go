@@ -6,7 +6,7 @@ import (
 
 	"github.com/pkg/sftp"
 
-	"github.com/lxc/incus/incusd/response"
+	"github.com/lxc/incus/v6/internal/server/response"
 )
 
 var sftpCmd = APIEndpoint{
@@ -27,6 +27,11 @@ type sftpServe struct {
 
 func (r *sftpServe) String() string {
 	return "sftp handler"
+}
+
+// Code returns the HTTP code.
+func (r *sftpServe) Code() int {
+	return http.StatusOK
 }
 
 func (r *sftpServe) Render(w http.ResponseWriter) error {

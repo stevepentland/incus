@@ -10,12 +10,12 @@ test_storage_volume_recover() {
   incus storage volume create "${poolName}" vol1 --type=block
 
   # Import ISO.
-  truncate -s 25MiB foo.iso
+  truncate -s 8MiB foo.iso
   incus storage volume import "${poolName}" ./foo.iso vol2 --type=iso
 
   # Delete database entry of the created custom block volume.
-  incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='vol1'"
-  incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='vol2'"
+  incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='vol1'"
+  incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='vol2'"
 
   # Ensure the custom block volume is no longer listed.
   ! incus storage volume show "${poolName}" vol1 || false
@@ -29,8 +29,8 @@ test_storage_volume_recover() {
     incus storage volume create "${poolName}" vol4 zfs.block_mode=true size=200MiB
 
     # Delete database entries of the created custom volumes.
-    incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='vol3'"
-    incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='vol4'"
+    incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='vol3'"
+    incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='vol4'"
 
     # Ensure the custom volumes are no longer listed.
     ! incus storage volume show "${poolName}" vol3 || false
@@ -38,7 +38,7 @@ test_storage_volume_recover() {
   fi
 
   # Recover custom block volume.
-  cat <<EOF | incusd recover
+  cat <<EOF | incus admin recover
 no
 yes
 yes
@@ -50,8 +50,8 @@ EOF
 
   if [ "$poolDriver" = "zfs" ]; then
     # Ensure custom storage volumes have been recovered.
-    incus storage volume show "${poolName}" vol3| grep -q 'content_type: filesystem'
-    incus storage volume show "${poolName}" vol4| grep -q 'content_type: filesystem'
+    incus storage volume show "${poolName}" vol3 | grep -q 'content_type: filesystem'
+    incus storage volume show "${poolName}" vol4 | grep -q 'content_type: filesystem'
 
     # Cleanup
     incus storage volume delete "${poolName}" vol3
@@ -62,7 +62,7 @@ EOF
   rm -f foo.iso
   incus storage volume delete "${poolName}" vol1
   incus storage volume delete "${poolName}" vol2
-  shutdown_incus "${INCUS_DIR}"
+  shutdown_incus "${INCUS_IMPORT_DIR}"
 }
 
 test_container_recover() {
@@ -89,7 +89,7 @@ test_container_recover() {
     incus project switch test
 
     # Basic no-op check.
-    cat <<EOF | incusd recover | grep "No unknown volumes found. Nothing to do."
+    cat <<EOF | incus admin recover | grep "No unknown storage pools or volumes found. Nothing to do."
 no
 yes
 EOF
@@ -111,8 +111,8 @@ EOF
     incus storage volume snapshot show "${poolName}" vol1_test/snap0
 
     # Remove container DB records and symlink.
-    incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM instances WHERE name='c1'"
-    incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='c1'"
+    incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM instances WHERE name='c1'"
+    incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='c1'"
     rm "${INCUS_DIR}/containers/test_c1"
 
     # Remove mount directories if block backed storage.
@@ -123,7 +123,7 @@ EOF
     fi
 
     # Remove custom volume DB record.
-    incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='vol1_test'"
+    incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='vol1_test'"
 
     # Remove mount directories if block backed storage.
     if [ "$poolDriver" != "dir" ] && [ "$poolDriver" != "btrfs" ] && [ "$poolDriver" != "cephfs" ]; then
@@ -158,7 +158,7 @@ EOF
 
     respawn_incus "${INCUS_DIR}" true
 
-    cat <<EOF | incusd recover
+    cat <<EOF | incus admin recover
 no
 yes
 yes
@@ -195,14 +195,14 @@ EOF
     incus exec c1 --project test -- hostname
 
     # Recover container that is running.
-    incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM instances WHERE name='c1'"
-    incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='c1'"
+    incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM instances WHERE name='c1'"
+    incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='c1'"
 
     # Restart Incus so internal mount counters are cleared for deleted (but running) container.
     shutdown_incus "${INCUS_DIR}"
     respawn_incus "${INCUS_DIR}" true
 
-    cat <<EOF | incusd recover
+    cat <<EOF | incus admin recover
 no
 yes
 yes
@@ -215,7 +215,7 @@ EOF
     incus exec c1 --project test -- hostname
 
     # Test recover after pool DB config deletion too.
-    poolConfigBefore=$(incusd sql global "SELECT key,value FROM storage_pools_config JOIN storage_pools ON storage_pools.id = storage_pools_config.storage_pool_id WHERE storage_pools.name = '${poolName}' ORDER BY key")
+    poolConfigBefore=$(incus admin sql global "SELECT key,value FROM storage_pools_config JOIN storage_pools ON storage_pools.id = storage_pools_config.storage_pool_id WHERE storage_pools.name = '${poolName}' ORDER BY key")
     poolSource=$(incus storage get "${poolName}" source)
     poolExtraConfig=""
 
@@ -236,11 +236,11 @@ ceph.user.name=$(incus storage get "${poolName}" ceph.user.name)
       ;;
     esac
 
-    incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM instances WHERE name='c1'"
-    incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='c1'"
-    incusd sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_pools WHERE name='${poolName}'"
+    incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM instances WHERE name='c1'"
+    incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_volumes WHERE name='c1'"
+    incus admin sql global "PRAGMA foreign_keys=ON; DELETE FROM storage_pools WHERE name='${poolName}'"
 
-    cat <<EOF |incusd recover
+    cat <<EOF |incus admin recover
 yes
 ${poolName}
 ${poolDriver}
@@ -253,7 +253,7 @@ EOF
 
     # Check recovered pool config (from instance backup file) matches what originally was there.
     incus storage show "${poolName}"
-    poolConfigAfter=$(incusd sql global "SELECT key,value FROM storage_pools_config JOIN storage_pools ON storage_pools.id = storage_pools_config.storage_pool_id WHERE storage_pools.name = '${poolName}' ORDER BY key")
+    poolConfigAfter=$(incus admin sql global "SELECT key,value FROM storage_pools_config JOIN storage_pools ON storage_pools.id = storage_pools_config.storage_pool_id WHERE storage_pools.name = '${poolName}' ORDER BY key")
     echo "Before:"
     echo "${poolConfigBefore}"
 
@@ -309,10 +309,10 @@ test_bucket_recover() {
     key2_secretKey=$(echo "$key2" | awk '/^Secret key/ { print $3 }')
 
     # Remove bucket from global DB
-    incusd sql global "delete from storage_buckets where name = '${bucketName}'"
+    incus admin sql global "delete from storage_buckets where name = '${bucketName}'"
 
     # Recover bucket
-    cat <<EOF | incusd recover
+    cat <<EOF | incus admin recover
 no
 yes
 yes
@@ -610,14 +610,14 @@ test_backup_rename() {
   ensure_import_testimage
   ensure_has_localhost_remote "${INCUS_ADDR}"
 
-  if ! incus query -X POST /1.0/instances/c1/backups/backupmissing -d '{\"name\": \"backupnewname\"}' --wait 2>&1 | grep -q "Error: Instance not found" ; then
+  if ! incus query -X POST /1.0/instances/c1/backups/backupmissing -d '{\"name\": \"backupnewname\"}' --wait 2>&1 | grep -q "Error: Instance backup not found" ; then
     echo "invalid rename response for missing container"
     false
   fi
 
   incus init testimage c1
 
-  if ! incus query -X POST /1.0/instances/c1/backups/backupmissing -d '{\"name\": \"backupnewname\"}' --wait 2>&1 | grep -q "Error: Load backup from database: Instance backup not found" ; then
+  if ! incus query -X POST /1.0/instances/c1/backups/backupmissing -d '{\"name\": \"backupnewname\"}' --wait 2>&1 | grep -q "Error: Instance backup not found" ; then
     echo "invalid rename response for missing backup"
     false
   fi
@@ -957,4 +957,62 @@ test_backup_volume_expiry() {
 
   # Cleanup.
   incus storage volume delete "${poolName}" vol1
+}
+
+test_backup_export_import_recover() {
+  (
+    set -e
+
+    poolName=$(incus profile device get default root pool)
+
+    ensure_import_testimage
+    ensure_has_localhost_remote "${INCUS_ADDR}"
+
+    # Create and export an instance.
+    incus launch testimage c1
+    incus export c1 "${INCUS_DIR}/c1.tar.gz"
+    incus delete -f c1
+
+    # Import instance and remove no longer required tarball.
+    incus import "${INCUS_DIR}/c1.tar.gz" c2
+    rm "${INCUS_DIR}/c1.tar.gz"
+
+    # Remove imported instance enteries from database.
+    incus admin sql global "delete from instances where name = 'c2'"
+    incus admin sql global "delete from storage_volumes where name = 'c2'"
+
+    # Recover removed instance.
+    cat <<EOF | incus admin recover
+no
+yes
+yes
+EOF
+
+    # Remove recovered instance.
+    incus rm -f c2
+  )
+}
+
+test_backup_export_import_instance_only() {
+  poolName=$(incus profile device get default root pool)
+
+  ensure_import_testimage
+  ensure_has_localhost_remote "${INCUS_ADDR}"
+
+  # Create an instance with snapshot.
+  incus init testimage c1
+  incus snapshot create c1
+
+  # Export the instance and remove it.
+  incus export c1 "${INCUS_DIR}/c1.tar.gz" --instance-only
+  incus delete -f c1
+
+  # Import the instance from tarball.
+  incus import "${INCUS_DIR}/c1.tar.gz"
+
+  # Verify imported instance has no snapshots.
+  [ "$(incus query "/1.0/storage-pools/${poolName}/volumes/container/c1/snapshots" | jq "length == 0")" = "true" ]
+
+  rm "${INCUS_DIR}/c1.tar.gz"
+  incus delete -f c1
 }

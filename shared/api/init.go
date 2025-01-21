@@ -6,7 +6,7 @@ package api
 //
 // API extension: preseed.
 type InitPreseed struct {
-	Node    InitLocalPreseed    `yaml:",inline"`
+	Server  InitLocalPreseed    `yaml:",inline"`
 	Cluster *InitClusterPreseed `json:"cluster" yaml:"cluster"`
 }
 
@@ -59,8 +59,4 @@ type InitClusterPreseed struct {
 	// The path to the cluster certificate
 	// Example: /tmp/cluster.crt
 	ClusterCertificatePath string `json:"cluster_certificate_path" yaml:"cluster_certificate_path"`
-
-	// A cluster join token
-	// Example: BASE64-TOKEN
-	ClusterToken string `json:"cluster_token" yaml:"cluster_token"`
 }

@@ -8,16 +8,16 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	"github.com/lxc/incus/shared/logger"
-	"github.com/lxc/incus/shared/tcp"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/logger"
+	"github.com/lxc/incus/v6/shared/tcp"
 )
 
 // ProtocolIncus represents an Incus API server.
@@ -69,7 +69,7 @@ func (r *ProtocolIncus) GetConnectionInfo() (*ConnectionInfo, error) {
 
 	info.Project = r.project
 	if info.Project == "" {
-		info.Project = "default"
+		info.Project = api.ProjectDefaultName
 	}
 
 	info.Target = r.clusterTarget
@@ -89,7 +89,7 @@ func (r *ProtocolIncus) GetConnectionInfo() (*ConnectionInfo, error) {
 			}
 
 			url := fmt.Sprintf("https://%s", addr)
-			if !shared.StringInSlice(url, urls) {
+			if !slices.Contains(urls, url) {
 				urls = append(urls, url)
 			}
 		}
@@ -151,7 +151,32 @@ func (r *ProtocolIncus) DoHTTP(req *http.Request) (*http.Response, error) {
 		return r.oidcClient.do(req)
 	}
 
-	return r.http.Do(req)
+	resp, err := r.http.Do(req)
+	if resp != nil && resp.StatusCode == http.StatusUseProxy && req.GetBody != nil {
+		// Reset the request body.
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+
+		req.Body = body
+
+		// Retry the request.
+		return r.http.Do(req)
+	}
+
+	return resp, err
+}
+
+// DoWebsocket performs a websocket connection, using OIDC authentication if set.
+func (r *ProtocolIncus) DoWebsocket(dialer websocket.Dialer, uri string, req *http.Request) (*websocket.Conn, *http.Response, error) {
+	r.addClientHeaders(req)
+
+	if r.oidcClient != nil {
+		return r.oidcClient.dial(dialer, uri, req)
+	}
+
+	return dialer.Dial(uri, req.Header)
 }
 
 // addClientHeaders sets headers from client settings.
@@ -221,7 +246,7 @@ func incusParseResponse(resp *http.Response) (*api.Response, string, error) {
 
 	// Handle errors
 	if response.Type == api.ErrorResponse {
-		return nil, "", api.StatusErrorf(resp.StatusCode, response.Error)
+		return &response, "", api.StatusErrorf(resp.StatusCode, response.Error)
 	}
 
 	return &response, etag, nil
@@ -245,10 +270,12 @@ func (r *ProtocolIncus) rawQuery(method string, url string, data any, ETag strin
 		switch data := data.(type) {
 		case io.Reader:
 			// Some data to be sent along with the request
-			req, err = http.NewRequestWithContext(r.ctx, method, url, data)
+			req, err = http.NewRequestWithContext(r.ctx, method, url, io.NopCloser(data))
 			if err != nil {
 				return nil, "", err
 			}
+
+			req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(data), nil }
 
 			// Set the encoding accordingly
 			req.Header.Set("Content-Type", "application/octet-stream")
@@ -266,6 +293,8 @@ func (r *ProtocolIncus) rawQuery(method string, url string, data any, ETag strin
 			if err != nil {
 				return nil, "", err
 			}
+
+			req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(buf.Bytes())), nil }
 
 			// Set the encoding accordingly
 			req.Header.Set("Content-Type", "application/json")
@@ -366,8 +395,13 @@ func (r *ProtocolIncus) queryStruct(method string, path string, data any, ETag s
 // It sets up an early event listener, performs the query, processes the response, and manages the lifecycle of the event listener.
 func (r *ProtocolIncus) queryOperation(method string, path string, data any, ETag string) (Operation, string, error) {
 	// Attempt to setup an early event listener
+	skipListener := false
 	listener, err := r.GetEvents()
 	if err != nil {
+		if api.StatusErrorCheck(err, http.StatusForbidden) {
+			skipListener = true
+		}
+
 		listener = nil
 	}
 
@@ -393,10 +427,11 @@ func (r *ProtocolIncus) queryOperation(method string, path string, data any, ETa
 
 	// Setup an Operation wrapper
 	op := operation{
-		Operation: *respOperation,
-		r:         r,
-		listener:  listener,
-		chActive:  make(chan bool),
+		Operation:    *respOperation,
+		r:            r,
+		listener:     listener,
+		skipListener: skipListener,
+		chActive:     make(chan bool),
 	}
 
 	// Log the data
@@ -417,19 +452,19 @@ func (r *ProtocolIncus) rawWebsocket(url string) (*websocket.Conn, error) {
 
 	// Setup a new websocket dialer based on it
 	dialer := websocket.Dialer{
-		NetDialContext:   httpTransport.DialContext,
-		TLSClientConfig:  httpTransport.TLSClientConfig,
-		Proxy:            httpTransport.Proxy,
-		HandshakeTimeout: time.Second * 5,
+		NetDialTLSContext: httpTransport.DialTLSContext,
+		NetDialContext:    httpTransport.DialContext,
+		TLSClientConfig:   httpTransport.TLSClientConfig,
+		Proxy:             httpTransport.Proxy,
+		HandshakeTimeout:  time.Second * 5,
 	}
 
 	// Create temporary http.Request using the http url, not the ws one, so that we can add the client headers
 	// for the websocket request.
 	req := &http.Request{URL: &r.httpBaseURL, Header: http.Header{}}
-	r.addClientHeaders(req)
 
 	// Establish the connection
-	conn, resp, err := dialer.Dial(url, req.Header)
+	conn, resp, err := r.DoWebsocket(dialer, url, req)
 	if err != nil {
 		if resp != nil {
 			_, _, err = incusParseResponse(resp)

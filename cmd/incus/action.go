@@ -3,15 +3,15 @@ package main
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	config "github.com/lxc/incus/internal/cliconfig"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
+	config "github.com/lxc/incus/v6/shared/cliconfig"
 )
 
 // Start.
@@ -31,6 +31,10 @@ func (c *cmdStart) Command() *cobra.Command {
 	cmd.Short = i18n.G("Start instances")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
 		`Start instances`))
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return c.global.cmpInstances(toComplete)
+	}
 
 	return cmd
 }
@@ -53,7 +57,36 @@ func (c *cmdPause) Command() *cobra.Command {
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
 		`Pause instances`))
 	cmd.Aliases = []string{"freeze"}
-	cmd.Hidden = true
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return c.global.cmpInstances(toComplete)
+	}
+
+	return cmd
+}
+
+// Resume.
+type cmdResume struct {
+	global *cmdGlobal
+	action *cmdAction
+}
+
+// Command returns a cobra.Command object representing the "resume" command.
+// It is used to resume (or unfreeze) one or more instances specified by the user.
+func (c *cmdResume) Command() *cobra.Command {
+	cmdAction := cmdAction{global: c.global}
+	c.action = &cmdAction
+
+	cmd := c.action.Command("resume")
+	cmd.Use = usage("resume", i18n.G("[<remote>:]<instance> [[<remote>:]<instance>...]"))
+	cmd.Short = i18n.G("Resume instances")
+	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
+		`Resume instances`))
+	cmd.Aliases = []string{"unfreeze"}
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return c.global.cmpInstances(toComplete)
+	}
 
 	return cmd
 }
@@ -74,9 +107,11 @@ func (c *cmdRestart) Command() *cobra.Command {
 	cmd.Use = usage("restart", i18n.G("[<remote>:]<instance> [[<remote>:]<instance>...]"))
 	cmd.Short = i18n.G("Restart instances")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
-		`Restart instances
+		`Restart instances`))
 
-The opposite of "incus pause" is "incus start".`))
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return c.global.cmpInstances(toComplete)
+	}
 
 	return cmd
 }
@@ -98,6 +133,10 @@ func (c *cmdStop) Command() *cobra.Command {
 	cmd.Short = i18n.G("Stop instances")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
 		`Stop instances`))
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return c.global.cmpInstances(toComplete)
+	}
 
 	return cmd
 }
@@ -127,12 +166,12 @@ func (c *cmdAction) Command(action string) *cobra.Command {
 		cmd.Flags().BoolVar(&c.flagStateless, "stateless", false, i18n.G("Ignore the instance state"))
 	}
 
-	if shared.StringInSlice(action, []string{"start", "restart", "stop"}) {
+	if slices.Contains([]string{"start", "restart", "stop"}, action) {
 		cmd.Flags().StringVar(&c.flagConsole, "console", "", i18n.G("Immediately attach to the console")+"``")
 		cmd.Flags().Lookup("console").NoOptDefVal = "console"
 	}
 
-	if shared.StringInSlice(action, []string{"restart", "stop"}) {
+	if slices.Contains([]string{"restart", "stop"}, action) {
 		cmd.Flags().BoolVarP(&c.flagForce, "force", "f", false, i18n.G("Force the instance to stop"))
 		cmd.Flags().IntVar(&c.flagTimeout, "timeout", -1, i18n.G("Time to wait for the instance to shutdown cleanly")+"``")
 	}
@@ -154,9 +193,11 @@ func (c *cmdAction) doActionAll(action string, resource remoteResource) error {
 		return err
 	}
 
-	// Pause is called freeze.
+	// Pause is called freeze, resume is called unfreeze.
 	if action == "pause" {
 		action = "freeze"
+	} else if action == "resume" {
+		action = "unfreeze"
 	}
 
 	// Only store state if asked to.
@@ -209,6 +250,11 @@ func (c *cmdAction) doAction(action string, conf *config.Config, nameArg string)
 	// Pause is called freeze
 	if action == "pause" {
 		action = "freeze"
+	}
+
+	// Resume is called unfreeze
+	if action == "resume" {
+		action = "unfreeze"
 	}
 
 	// Only store state if asked to
@@ -268,7 +314,7 @@ func (c *cmdAction) doAction(action string, conf *config.Config, nameArg string)
 		console := cmdConsole{}
 		console.global = c.global
 		console.flagType = c.flagConsole
-		return console.Console(d, name)
+		return console.console(d, name)
 	}
 
 	progress := cli.ProgressRenderer{
@@ -285,7 +331,12 @@ func (c *cmdAction) doAction(action string, conf *config.Config, nameArg string)
 	err = cli.CancelableWait(op, &progress)
 	if err != nil {
 		progress.Done("")
-		return fmt.Errorf("%s\n"+i18n.G("Try `incus info --show-log %s` for more info"), err, nameArg)
+		projectArg := ""
+		if conf.ProjectOverride != "" && conf.ProjectOverride != api.ProjectDefaultName {
+			projectArg = " --project " + conf.ProjectOverride
+		}
+
+		return fmt.Errorf("%s\n"+i18n.G("Try `incus info --show-log %s%s` for more info"), err, nameArg, projectArg)
 	}
 
 	progress.Done("")
@@ -295,7 +346,22 @@ func (c *cmdAction) doAction(action string, conf *config.Config, nameArg string)
 		console := cmdConsole{}
 		console.global = c.global
 		console.flagType = c.flagConsole
-		return console.Console(d, name)
+
+		consoleErr := console.console(d, name)
+		if consoleErr != nil {
+			// Check if still running.
+			state, _, err := d.GetInstanceState(name)
+			if err != nil {
+				return err
+			}
+
+			if state.StatusCode != api.Stopped {
+				return consoleErr
+			}
+
+			console.flagShowLog = true
+			return console.console(d, name)
+		}
 	}
 
 	return nil

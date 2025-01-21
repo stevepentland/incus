@@ -1,7 +1,3 @@
----
-discourse: 11033
----
-
 (network-ovn)=
 # OVN network
 
@@ -14,7 +10,7 @@ See [`www.ovn.org`](https://www.ovn.org/) for more information.
 The `ovn` network type allows to create logical networks using the OVN {abbr}`SDN (software-defined networking)`.
 This kind of network can be useful for labs and multi-tenant environments where the same logical subnets are used in multiple discrete networks.
 
-A LXD OVN network can be connected to an existing managed {ref}`network-bridge` or {ref}`network-physical` to gain access to the wider network.
+An Incus OVN network can be connected to an existing managed {ref}`network-bridge` or {ref}`network-physical` to gain access to the wider network.
 By default, all connections from the OVN logical networks are NATed to an IP allocated from the uplink network.
 
 See {ref}`network-ovn-setup` for basic instructions for setting up an OVN network.
@@ -45,10 +41,11 @@ The following configuration options are available for the `ovn` network type:
 
 Key                                  | Type      | Condition             | Default                   | Description
 :--                                  | :--       | :--                   | :--                       | :--
-`network`                            | string    | -                     | -                         | Uplink network to use for external network access
+`network`                            | string    | -                     | -                         | Uplink network to use for external network access or `none` to keep isolated
+`bridge.external_interfaces`         | string    | -                     | -                         | Comma-separated list of unconfigured network interfaces to include in the bridge
 `bridge.hwaddr`                      | string    | -                     | -                         | MAC address for the bridge
 `bridge.mtu`                         | integer   | -                     | `1442`                    | Bridge MTU (default allows host to host Geneve tunnels)
-`dns.domain`                         | string    | -                     | `lxd`                     | Domain to advertise to DHCP clients and use for DNS resolution
+`dns.domain`                         | string    | -                     | `incus`                   | Domain to advertise to DHCP clients and use for DNS resolution
 `dns.search`                         | string    | -                     | -                         | Full comma-separated domain search list, defaulting to `dns.domain` value
 `dns.zone.forward`                   | string    | -                     | -                         | Comma-separated list of DNS zone names for forward DNS records
 `dns.zone.reverse.ipv4`              | string    | -                     | -                         | DNS zone name for IPv4 reverse DNS records
@@ -78,6 +75,7 @@ The following features are supported for the `ovn` network type:
 
 - {ref}`network-acls`
 - {ref}`network-forwards`
+- {ref}`network-integrations`
 - {ref}`network-zones`
 - {ref}`network-ovn-peers`
 - {ref}`network-load-balancers`

@@ -10,11 +10,11 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/termios"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/termios"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 type cmdNetworkLoadBalancer struct {
@@ -43,6 +43,10 @@ func (c *cmdNetworkLoadBalancer) Command() *cobra.Command {
 	// Get.
 	networkLoadBalancerGetCmd := cmdNetworkLoadBalancerGet{global: c.global, networkLoadBalancer: c}
 	cmd.AddCommand(networkLoadBalancerGetCmd.Command())
+
+	// Info.
+	networkLoadBalancerInfoCmd := cmdNetworkLoadBalancerInfo{global: c.global, networkLoadBalancer: c}
+	cmd.AddCommand(networkLoadBalancerInfoCmd.Command())
 
 	// Set.
 	networkLoadBalancerSetCmd := cmdNetworkLoadBalancerSet{global: c.global, networkLoadBalancer: c}
@@ -79,7 +83,13 @@ type cmdNetworkLoadBalancerList struct {
 	global              *cmdGlobal
 	networkLoadBalancer *cmdNetworkLoadBalancer
 
-	flagFormat string
+	flagFormat  string
+	flagColumns string
+}
+
+type networkLoadBalancerColumn struct {
+	Name string
+	Data func(api.NetworkLoadBalancer) string
 }
 
 func (c *cmdNetworkLoadBalancerList) Command() *cobra.Command {
@@ -87,12 +97,94 @@ func (c *cmdNetworkLoadBalancerList) Command() *cobra.Command {
 	cmd.Use = usage("list", i18n.G("[<remote>:]<network>"))
 	cmd.Aliases = []string{"ls"}
 	cmd.Short = i18n.G("List available network load balancers")
-	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("List available network load balancers"))
+	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
+		`List available network load balancers
+
+Default column layout: ldp
+
+== Columns ==
+The -c option takes a comma separated list of arguments that control
+which instance attributes to output when displaying in table or csv
+format.
+
+Column arguments are either pre-defined shorthand chars (see below),
+or (extended) config keys.
+
+Commas between consecutive shorthand chars are optional.
+
+Pre-defined column shorthand chars:
+  l - Listen Address
+  d - Description
+  p - Ports
+  L - Location of the operation (e.g. its cluster member)`))
 
 	cmd.RunE = c.Run
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
+	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", defaultNetworkLoadBalancerColumns, i18n.G("Columns")+"``")
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
+}
+
+const defaultNetworkLoadBalancerColumns = "ldp"
+
+func (c *cmdNetworkLoadBalancerList) parseColumns(clustered bool) ([]networkLoadBalancerColumn, error) {
+	columnsShorthandMap := map[rune]networkLoadBalancerColumn{
+		'l': {i18n.G("LISTEN ADDRESS"), c.listenAddressColumnData},
+		'd': {i18n.G("DESCRIPTION"), c.descriptionColumnData},
+		'p': {i18n.G("PORTS"), c.portsColumnData},
+		'L': {i18n.G("LOCATION"), c.locationColumnData},
+	}
+
+	columnList := strings.Split(c.flagColumns, ",")
+	columns := []networkLoadBalancerColumn{}
+	if c.flagColumns == defaultNetworkLoadBalancerColumns && clustered {
+		columnList = append(columnList, "L")
+	}
+
+	for _, columnEntry := range columnList {
+		if columnEntry == "" {
+			return nil, fmt.Errorf(i18n.G("Empty column entry (redundant, leading or trailing command) in '%s'"), c.flagColumns)
+		}
+
+		for _, columnRune := range columnEntry {
+			column, ok := columnsShorthandMap[columnRune]
+			if !ok {
+				return nil, fmt.Errorf(i18n.G("Unknown column shorthand char '%c' in '%s'"), columnRune, columnEntry)
+			}
+
+			columns = append(columns, column)
+		}
+	}
+
+	return columns, nil
+}
+
+func (c *cmdNetworkLoadBalancerList) listenAddressColumnData(loadBalancer api.NetworkLoadBalancer) string {
+	return loadBalancer.ListenAddress
+}
+
+func (c *cmdNetworkLoadBalancerList) descriptionColumnData(loadBalancer api.NetworkLoadBalancer) string {
+	return loadBalancer.Description
+}
+
+func (c *cmdNetworkLoadBalancerList) portsColumnData(loadBalancer api.NetworkLoadBalancer) string {
+	return fmt.Sprintf("%d", len(loadBalancer.Ports))
+}
+
+func (c *cmdNetworkLoadBalancerList) locationColumnData(loadBalancer api.NetworkLoadBalancer) string {
+	return loadBalancer.Location
 }
 
 func (c *cmdNetworkLoadBalancerList) Run(cmd *cobra.Command, args []string) error {
@@ -124,36 +216,31 @@ func (c *cmdNetworkLoadBalancerList) Run(cmd *cobra.Command, args []string) erro
 		return err
 	}
 
-	clustered := resource.server.IsClustered()
+	// Parse column flags.
+	columns, err := c.parseColumns(resource.server.IsClustered())
+	if err != nil {
+		return err
+	}
 
-	data := make([][]string, 0, len(loadBalancers))
+	// Render the table
+	data := [][]string{}
 	for _, loadBalancer := range loadBalancers {
-		details := []string{
-			loadBalancer.ListenAddress,
-			loadBalancer.Description,
-			fmt.Sprintf("%d", len(loadBalancer.Ports)),
+		line := []string{}
+		for _, column := range columns {
+			line = append(line, column.Data(loadBalancer))
 		}
 
-		if clustered {
-			details = append(details, loadBalancer.Location)
-		}
-
-		data = append(data, details)
+		data = append(data, line)
 	}
 
 	sort.Sort(cli.SortColumnsNaturally(data))
 
-	header := []string{
-		i18n.G("LISTEN ADDRESS"),
-		i18n.G("DESCRIPTION"),
-		i18n.G("PORTS"),
+	header := []string{}
+	for _, column := range columns {
+		header = append(header, column.Name)
 	}
 
-	if clustered {
-		header = append(header, i18n.G("LOCATION"))
-	}
-
-	return cli.RenderTable(c.flagFormat, header, data, loadBalancers)
+	return cli.RenderTable(os.Stdout, c.flagFormat, header, data, loadBalancers)
 }
 
 // Show.
@@ -170,6 +257,18 @@ func (c *cmdNetworkLoadBalancerShow) Command() *cobra.Command {
 	cmd.RunE = c.Run
 
 	cmd.Flags().StringVar(&c.networkLoadBalancer.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkLoadBalancers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -224,6 +323,7 @@ func (c *cmdNetworkLoadBalancerShow) Run(cmd *cobra.Command, args []string) erro
 type cmdNetworkLoadBalancerCreate struct {
 	global              *cmdGlobal
 	networkLoadBalancer *cmdNetworkLoadBalancer
+	flagDescription     string
 }
 
 func (c *cmdNetworkLoadBalancerCreate) Command() *cobra.Command {
@@ -231,9 +331,15 @@ func (c *cmdNetworkLoadBalancerCreate) Command() *cobra.Command {
 	cmd.Use = usage("create", i18n.G("[<remote>:]<network> <listen_address> [key=value...]"))
 	cmd.Short = i18n.G("Create new network load balancers")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Create new network load balancers"))
+	cmd.Example = cli.FormatSection("", i18n.G(`incus network load-balancer create n1 127.0.0.1
+
+incus network load-balancer create n1 127.0.0.1 < config.yaml
+    Create network load-balancer for network n1 with configuration from config.yaml`))
+
 	cmd.RunE = c.Run
 
 	cmd.Flags().StringVar(&c.networkLoadBalancer.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Load balancer description")+"``")
 
 	return cmd
 }
@@ -293,6 +399,10 @@ func (c *cmdNetworkLoadBalancerCreate) Run(cmd *cobra.Command, args []string) er
 	loadBalancer := api.NetworkLoadBalancersPost{
 		ListenAddress:          args[1],
 		NetworkLoadBalancerPut: loadBalancerPut,
+	}
+
+	if c.flagDescription != "" {
+		loadBalancer.Description = c.flagDescription
 	}
 
 	loadBalancer.Normalise()
@@ -405,6 +515,18 @@ For backward compatibility, a single configuration key may still be set with:
 
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Set the key as a network load balancer property"))
 	cmd.Flags().StringVar(&c.networkLoadBalancer.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkLoadBalancers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -529,6 +651,18 @@ func (c *cmdNetworkLoadBalancerEdit) Command() *cobra.Command {
 
 	cmd.Flags().StringVar(&c.networkLoadBalancer.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkLoadBalancers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
 }
 
@@ -542,14 +676,24 @@ func (c *cmdNetworkLoadBalancerEdit) helpTemplate() string {
 ### An example would look like:
 ### listen_address: 192.0.2.1
 ### config:
-###   target_address: 198.51.100.2
+###   user.foo: bar
 ### description: test desc
-### port:
+### backends:
+### - name: backend1
+###   description: First backend server
+###   target_address: 192.0.3.1
+###   target_port: 80
+### - name: backend2
+###   description: Second backend server
+###   target_address: 192.0.3.2
+###   target_port: 80
+### ports:
 ### - description: port forward
 ###   protocol: tcp
 ###   listen_port: 80,81,8080-8090
-###   target_address: 198.51.100.3
-###   target_port: 80,81,8080-8090
+###   target_backend:
+###    - backend1
+###    - backend2
 ### location: server01
 ###
 ### Note that the listen_address and location cannot be changed.`)
@@ -618,7 +762,7 @@ func (c *cmdNetworkLoadBalancerEdit) Run(cmd *cobra.Command, args []string) erro
 	}
 
 	// Spawn the editor.
-	content, err := shared.TextEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
+	content, err := textEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
 	if err != nil {
 		return err
 	}
@@ -642,7 +786,7 @@ func (c *cmdNetworkLoadBalancerEdit) Run(cmd *cobra.Command, args []string) erro
 				return err
 			}
 
-			content, err = shared.TextEditor("", content)
+			content, err = textEditor("", content)
 			if err != nil {
 				return err
 			}
@@ -671,6 +815,18 @@ func (c *cmdNetworkLoadBalancerDelete) Command() *cobra.Command {
 	cmd.RunE = c.Run
 
 	cmd.Flags().StringVar(&c.networkLoadBalancer.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkLoadBalancers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -722,6 +878,7 @@ func (c *cmdNetworkLoadBalancerDelete) Run(cmd *cobra.Command, args []string) er
 type cmdNetworkLoadBalancerBackend struct {
 	global              *cmdGlobal
 	networkLoadBalancer *cmdNetworkLoadBalancer
+	flagDescription     string
 }
 
 func (c *cmdNetworkLoadBalancerBackend) Command() *cobra.Command {
@@ -747,6 +904,19 @@ func (c *cmdNetworkLoadBalancerBackend) CommandAdd() *cobra.Command {
 	cmd.RunE = c.RunAdd
 
 	cmd.Flags().StringVar(&c.networkLoadBalancer.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Backend description")+"``")
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkLoadBalancers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -790,6 +960,7 @@ func (c *cmdNetworkLoadBalancerBackend) RunAdd(cmd *cobra.Command, args []string
 	backend := api.NetworkLoadBalancerBackend{
 		Name:          args[2],
 		TargetAddress: args[3],
+		Description:   c.flagDescription,
 	}
 
 	if len(args) >= 5 {
@@ -811,6 +982,18 @@ func (c *cmdNetworkLoadBalancerBackend) CommandRemove() *cobra.Command {
 	cmd.RunE = c.RunRemove
 
 	cmd.Flags().StringVar(&c.networkLoadBalancer.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkLoadBalancers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -887,6 +1070,7 @@ type cmdNetworkLoadBalancerPort struct {
 	global              *cmdGlobal
 	networkLoadBalancer *cmdNetworkLoadBalancer
 	flagRemoveForce     bool
+	flagDescription     string
 }
 
 func (c *cmdNetworkLoadBalancerPort) Command() *cobra.Command {
@@ -912,6 +1096,19 @@ func (c *cmdNetworkLoadBalancerPort) CommandAdd() *cobra.Command {
 	cmd.RunE = c.RunAdd
 
 	cmd.Flags().StringVar(&c.networkLoadBalancer.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Port description")+"``")
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkLoadBalancers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -955,7 +1152,8 @@ func (c *cmdNetworkLoadBalancerPort) RunAdd(cmd *cobra.Command, args []string) e
 	port := api.NetworkLoadBalancerPort{
 		Protocol:      args[2],
 		ListenPort:    args[3],
-		TargetBackend: shared.SplitNTrimSpace(args[4], ",", -1, false),
+		TargetBackend: util.SplitNTrimSpace(args[4], ",", -1, false),
+		Description:   c.flagDescription,
 	}
 
 	loadBalancer.Ports = append(loadBalancer.Ports, port)
@@ -974,6 +1172,18 @@ func (c *cmdNetworkLoadBalancerPort) CommandRemove() *cobra.Command {
 	cmd.RunE = c.RunRemove
 
 	cmd.Flags().StringVar(&c.networkLoadBalancer.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpNetworks(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpNetworkLoadBalancers(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -1067,4 +1277,75 @@ func (c *cmdNetworkLoadBalancerPort) RunRemove(cmd *cobra.Command, args []string
 	loadBalancer.Normalise()
 
 	return client.UpdateNetworkLoadBalancer(resource.name, loadBalancer.ListenAddress, loadBalancer.Writable(), etag)
+}
+
+// Info.
+type cmdNetworkLoadBalancerInfo struct {
+	global              *cmdGlobal
+	networkLoadBalancer *cmdNetworkLoadBalancer
+}
+
+// Command generates the command definition.
+func (c *cmdNetworkLoadBalancerInfo) Command() *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Use = usage("info", i18n.G("[<remote>:]<network> <listen_address>"))
+	cmd.Short = i18n.G("Get current load balancer status")
+	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G("Get current load-balacner status"))
+	cmd.RunE = c.Run
+
+	return cmd
+}
+
+// Run runs the actual command logic.
+func (c *cmdNetworkLoadBalancerInfo) Run(cmd *cobra.Command, args []string) error {
+	// Quick checks.
+	exit, err := c.global.CheckArgs(cmd, args, 2, 2)
+	if exit {
+		return err
+	}
+
+	// Parse remote
+	resources, err := c.global.ParseServers(args[0])
+	if err != nil {
+		return err
+	}
+
+	resource := resources[0]
+	client := resource.server
+
+	if resource.name == "" {
+		return fmt.Errorf("%s", i18n.G("Missing network name"))
+	}
+
+	if args[1] == "" {
+		return fmt.Errorf("%s", i18n.G("Missing listen address"))
+	}
+
+	// Get the load-balancer state.
+	lbState, err := client.GetNetworkLoadBalancerState(resource.name, args[1])
+	if err != nil {
+		return err
+	}
+
+	// Render the state.
+	if lbState.BackendHealth == nil {
+		// Currently the only field in the state endpoint is the backend health, fail if it's missing.
+		return fmt.Errorf("%s", i18n.G("No load-balancer health information available"))
+	}
+
+	fmt.Println(i18n.G("Backend health:"))
+	for backend, info := range lbState.BackendHealth {
+		if len(info.Ports) == 0 {
+			continue
+		}
+
+		fmt.Printf("  %s (%s):\n", backend, info.Address)
+		for _, port := range info.Ports {
+			fmt.Printf("    - %s/%d: %s\n", port.Protocol, port.Port, port.Status)
+		}
+
+		fmt.Println("")
+	}
+
+	return nil
 }

@@ -8,7 +8,6 @@ setup_clustering_bridge() {
   ip link add "${name}" up type bridge
   ip addr add 10.1.1.1/16 dev "${name}"
 
-  # shellcheck disable=SC2039
   iptables -w -t nat -A POSTROUTING -s 10.1.0.0/16 -d 0.0.0.0/0 -j MASQUERADE
   echo 1 > /proc/sys/net/ipv4/ip_forward
 }
@@ -110,7 +109,7 @@ teardown_clustering_netns() {
 }
 
 spawn_incus_and_bootstrap_cluster() {
-  # shellcheck disable=2039,3043
+  # shellcheck disable=SC2039,SC3043
   local INCUS_NETNS
 
   set -e
@@ -134,7 +133,6 @@ spawn_incus_and_bootstrap_cluster() {
 
     cat > "${INCUS_DIR}/preseed.yaml" <<EOF
 config:
-  core.trust_password: sekret
   core.https_address: 10.1.1.101:8443
 EOF
     if [ "${port}" != "" ]; then
@@ -195,12 +193,12 @@ cluster:
   server_name: node1
   enabled: true
 EOF
-  incusd init --preseed < "${INCUS_DIR}/preseed.yaml"
+  incus admin init --preseed < "${INCUS_DIR}/preseed.yaml"
   )
 }
 
 spawn_incus_and_join_cluster() {
-  # shellcheck disable=2039,2034,3043
+  # shellcheck disable=SC2039,SC3043
   local INCUS_NETNS
 
   set -e
@@ -210,17 +208,21 @@ spawn_incus_and_join_cluster() {
   index="${4}"
   target="${5}"
   INCUS_DIR="${6}"
+  if [ -d "${7}" ]; then
+    token="$(INCUS_DIR=${7} incus cluster add "node${index}" --quiet)"
+  else
+    token="${7}"
+  fi
   driver="dir"
   port="8443"
-  if [ "$#" -ge  "7" ]; then
-      driver="${7}"
-  fi
   if [ "$#" -ge  "8" ]; then
-      port="${8}"
+      driver="${8}"
+  fi
+  if [ "$#" -ge  "9" ]; then
+      port="${9}"
   fi
 
   echo "==> Spawn additional cluster node in ${ns} with storage driver ${driver}"
-  secret="${INCUS_SECRET:-"sekret"}"
 
   INCUS_NETNS="${ns}" spawn_incus "${INCUS_DIR}" false
   (
@@ -239,7 +241,7 @@ cluster:
   server_address: 10.1.1.10${index}:${port}
   cluster_address: 10.1.1.10${target}:8443
   cluster_certificate: "$cert"
-  cluster_password: ${secret}
+  cluster_token: ${token}
   member_config:
 EOF
     # Declare the pool only if the driver is not ceph, because
@@ -286,12 +288,12 @@ EOF
       fi
     fi
 
-    incusd init --preseed < "${INCUS_DIR}/preseed.yaml"
+    incus admin init --preseed < "${INCUS_DIR}/preseed.yaml"
   )
 }
 
 respawn_incus_cluster_member() {
-  # shellcheck disable=2039,2034,3043
+  # shellcheck disable=SC2039,SC2034,SC3043
   local INCUS_NETNS
 
   set -e

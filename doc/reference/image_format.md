@@ -28,7 +28,7 @@ For both instance types, the `templates/` directory is optional.
 
 ### Metadata
 
-The `metadata.yaml` file contains information that is relevant to running the image in LXD.
+The `metadata.yaml` file contains information that is relevant to running the image in Incus.
 It includes the following information:
 
 ```yaml
@@ -87,6 +87,14 @@ templates:
       - create
     template: interfaces.tpl
     create_only: true
+  /home/foo/setup.sh:
+    when:
+      - create
+    template: setup.sh.tpl
+    create_only: true
+    uid: 1000
+    gid: 1000
+    mode: 755
 ```
 
 The `when` key can be one or more of:
@@ -99,7 +107,9 @@ The `template` key points to the template file in the `templates/` directory.
 
 You can pass user-defined template properties to the template file through the `properties` key.
 
-Set the `create_only` key if you want LXD to create the file if it doesn't exist, but not overwrite an existing file.
+Set the `create_only` key if you want Incus to create the file if it doesn't exist, but not overwrite an existing file.
+
+The `uid`, `gid` and `mode` keys can be used to control the file ownership and permissions.
 
 #### Template files
 
@@ -122,10 +132,10 @@ For convenience, the following functions are exported to the Pongo2 templates:
 
 ## Image tarballs
 
-LXD supports two LXD-specific image formats: a unified tarball and split tarballs.
+Incus supports two Incus-specific image formats: a unified tarball and split tarballs.
 
 These tarballs can be compressed.
-LXD supports a wide variety of compression algorithms for tarballs.
+Incus supports a wide variety of compression algorithms for tarballs.
 However, for compatibility purposes, you should use `gzip` or `xz`.
 
 (image-format-unified)=
@@ -133,22 +143,24 @@ However, for compatibility purposes, you should use `gzip` or `xz`.
 
 A unified tarball is a single tarball (usually `*.tar.xz`) that contains the full content of the image, including the metadata, the root file system and optionally the template files.
 
-This is the format that LXD itself uses internally when publishing images.
-It is usually easier to work with; therefore, you should use the unified format when creating LXD-specific images.
+This is the format that Incus itself uses internally when publishing images.
+It is usually easier to work with; therefore, you should use the unified format when creating Incus-specific images.
 
 The image identifier for such images is the SHA-256 of the tarball.
 
 (image-format-split)=
 ### Split tarballs
 
-A split image consists of two separate tarballs.
-One tarball contains the metadata and optionally the template files (usually `*.tar.xz`), and the other contains the root file system (usually `*.squashfs` for containers or `*.qcow2` for virtual machines).
+A split image consists of two files.
+The first is a tarball containing the metadata and optionally the template files (usually `*.tar.xz`).
+The second can be a tarball, `squashfs` or `qcow2` image containing the actual instance data.
 
-For containers, the root file system tarball can be SquashFS-formatted.
-For virtual machines, the `rootfs.img` file always uses the `qcow2` format.
-It can optionally be compressed using `qcow2`'s native compression.
+For containers, the second file is most commonly a SquashFS-formatted file system tree, though it can also be a tarball of the same tree.
+For virtual machines, the second file is always a `qcow2` formatted disk image.
 
-This format is designed to allow for easy image building from existing non-LXD rootfs tarballs that are already available.
-You should also use this format if you want to create images that can be consumed by both LXD and other tools.
+Tarballs can be externally compressed (`.tar.xz`, `.tar.gz`, ...) whereas `squashfs` and `qcow2` can be internally compressed through their respective native compression options.
 
-The image identifier for such images is the SHA-256 of the concatenation of the metadata and root file system tarball (in that order).
+This format is designed to allow for easy image building from existing non-Incus rootfs tarballs that are already available.
+You should also use this format if you want to create images that can be consumed by both Incus and other tools.
+
+The image identifier for such images is the SHA-256 of the concatenation of the metadata and data files (in that order).

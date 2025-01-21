@@ -6,30 +6,31 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/client"
-	config "github.com/lxc/incus/internal/cliconfig"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/internal/instance"
+	"github.com/lxc/incus/v6/shared/api"
+	config "github.com/lxc/incus/v6/shared/cliconfig"
 )
 
 type cmdCopy struct {
 	global *cmdGlobal
 
-	flagNoProfiles        bool
-	flagProfile           []string
-	flagConfig            []string
-	flagDevice            []string
-	flagEphemeral         bool
-	flagInstanceOnly      bool
-	flagMode              string
-	flagStateless         bool
-	flagStorage           string
-	flagTarget            string
-	flagTargetProject     string
-	flagRefresh           bool
-	flagAllowInconsistent bool
+	flagNoProfiles          bool
+	flagProfile             []string
+	flagConfig              []string
+	flagDevice              []string
+	flagEphemeral           bool
+	flagInstanceOnly        bool
+	flagMode                string
+	flagStateless           bool
+	flagStorage             string
+	flagTarget              string
+	flagTargetProject       string
+	flagRefresh             bool
+	flagRefreshExcludeOlder bool
+	flagAllowInconsistent   bool
 }
 
 func (c *cmdCopy) Command() *cobra.Command {
@@ -61,7 +62,20 @@ The pull transfer mode is the default as it is compatible with all server versio
 	cmd.Flags().StringVar(&c.flagTargetProject, "target-project", "", i18n.G("Copy to a project different from the source")+"``")
 	cmd.Flags().BoolVar(&c.flagNoProfiles, "no-profiles", false, i18n.G("Create the instance with no profiles applied"))
 	cmd.Flags().BoolVar(&c.flagRefresh, "refresh", false, i18n.G("Perform an incremental copy"))
+	cmd.Flags().BoolVar(&c.flagRefreshExcludeOlder, "refresh-exclude-older", false, i18n.G("During incremental copy, exclude source snapshots earlier than latest target snapshot"))
 	cmd.Flags().BoolVar(&c.flagAllowInconsistent, "allow-inconsistent", false, i18n.G("Ignore copy errors for volatile files"))
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstances(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpRemotes(toComplete, false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -84,19 +98,21 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		return fmt.Errorf(i18n.G("You must specify a source instance name"))
 	}
 
-	// Check that a destination instance was specified, if --target is passed.
-	if destName == "" && c.flagTarget != "" {
-		return fmt.Errorf(i18n.G("You must specify a destination instance name when using --target"))
-	}
-
 	// Don't allow refreshing without profiles.
 	if c.flagRefresh && c.flagNoProfiles {
 		return fmt.Errorf(i18n.G("--no-profiles cannot be used with --refresh"))
 	}
 
-	// If no destination name was provided, use the same as the source
-	if destName == "" && destResource != "" {
-		destName = sourceName
+	// If the instance is being copied to a different remote and no destination name is
+	// specified, use the source name with snapshot suffix trimmed (in case a new instance
+	// is being created from a snapshot).
+	if destName == "" && destResource != "" && c.flagTarget == "" {
+		destName = strings.SplitN(sourceName, instance.SnapshotDelimiter, 2)[0]
+	}
+
+	// Ensure that a destination name is provided.
+	if destName == "" {
+		return fmt.Errorf(i18n.G("You must specify a destination instance name"))
 	}
 
 	// Connect to the source host
@@ -131,12 +147,12 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 	// Parse the config overrides
 	configMap := map[string]string{}
 	for _, entry := range c.flagConfig {
-		if !strings.Contains(entry, "=") {
-			return fmt.Errorf(i18n.G("Bad key=value pair: %s"), entry)
+		key, value, found := strings.Cut(entry, "=")
+		if !found {
+			return fmt.Errorf(i18n.G("Bad key=value pair: %q"), entry)
 		}
 
-		fields := strings.SplitN(entry, "=", 2)
-		configMap[fields[0]] = fields[1]
+		configMap[key] = value
 	}
 
 	deviceMap, err := parseDeviceOverrides(c.flagDevice)
@@ -148,7 +164,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 	var writable api.InstancePut
 	var start bool
 
-	if shared.IsSnapshot(sourceName) {
+	if instance.IsSnapshot(sourceName) {
 		if instanceOnly {
 			return fmt.Errorf(i18n.G("--instance-only can't be passed when the source is a snapshot"))
 		}
@@ -165,7 +181,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		}
 
 		// Copy of a snapshot into a new instance
-		srcFields := strings.SplitN(sourceName, shared.SnapshotDelimiter, 2)
+		srcFields := strings.SplitN(sourceName, instance.SnapshotDelimiter, 2)
 		entry, _, err := source.GetInstanceSnapshot(srcFields[0], srcFields[1])
 		if err != nil {
 			return err
@@ -202,7 +218,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 			entry.Ephemeral = false
 		}
 
-		rootDiskDeviceKey, _, _ := shared.GetRootDiskDevice(entry.Devices)
+		rootDiskDeviceKey, _, _ := instance.GetRootDiskDevice(entry.Devices)
 		if err != nil {
 			return err
 		}
@@ -223,7 +239,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 
 			if !keepVolatile {
 				for k := range entry.Config {
-					if !shared.InstanceIncludeWhenCopying(k, true) {
+					if !instance.InstanceIncludeWhenCopying(k, true) {
 						delete(entry.Config, k)
 					}
 				}
@@ -242,12 +258,13 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 	} else {
 		// Prepare the instance creation request
 		args := incus.InstanceCopyArgs{
-			Name:              destName,
-			Live:              stateful,
-			InstanceOnly:      instanceOnly,
-			Mode:              mode,
-			Refresh:           c.flagRefresh,
-			AllowInconsistent: c.flagAllowInconsistent,
+			Name:                destName,
+			Live:                stateful,
+			InstanceOnly:        instanceOnly,
+			Mode:                mode,
+			Refresh:             c.flagRefresh,
+			RefreshExcludeOlder: c.flagRefreshExcludeOlder,
+			AllowInconsistent:   c.flagAllowInconsistent,
 		}
 
 		// Copy of an instance into a new instance
@@ -293,7 +310,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 			entry.Ephemeral = false
 		}
 
-		rootDiskDeviceKey, _, _ := shared.GetRootDiskDevice(entry.Devices)
+		rootDiskDeviceKey, _, _ := instance.GetRootDiskDevice(entry.Devices)
 		if rootDiskDeviceKey != "" && pool != "" {
 			entry.Devices[rootDiskDeviceKey]["pool"] = pool
 		} else if pool != "" {
@@ -307,7 +324,7 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		// Strip the volatile keys if requested
 		if !keepVolatile {
 			for k := range entry.Config {
-				if !shared.InstanceIncludeWhenCopying(k, true) {
+				if !instance.InstanceIncludeWhenCopying(k, true) {
 					delete(entry.Config, k)
 				}
 			}
@@ -364,8 +381,8 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		}
 
 		// Ensure we don't change the target's root disk pool.
-		srcRootDiskDeviceKey, _, _ := shared.GetRootDiskDevice(writable.Devices)
-		destRootDiskDeviceKey, destRootDiskDevice, _ := shared.GetRootDiskDevice(inst.Devices)
+		srcRootDiskDeviceKey, _, _ := instance.GetRootDiskDevice(writable.Devices)
+		destRootDiskDeviceKey, destRootDiskDevice, _ := instance.GetRootDiskDevice(inst.Devices)
 		if srcRootDiskDeviceKey != "" && srcRootDiskDeviceKey == destRootDiskDeviceKey {
 			writable.Devices[destRootDiskDeviceKey]["pool"] = destRootDiskDevice["pool"]
 		}
@@ -397,33 +414,10 @@ func (c *cmdCopy) copyInstance(conf *config.Config, sourceResource string, destR
 		progress.Done("")
 	}
 
-	// If choosing a random name, show it to the user
-	if destResource == "" && c.flagTargetProject == "" {
-		// Get the successful operation data
-		opInfo, err := op.GetTarget()
-		if err != nil {
-			return err
-		}
-
-		// Extract the list of affected instances
-		instances, ok := opInfo.Resources["instances"]
-		if !ok || len(instances) != 1 {
-			// Extract the list of affected instances using old "containers" field
-			instances, ok = opInfo.Resources["containers"]
-			if !ok || len(instances) != 1 {
-				return fmt.Errorf(i18n.G("Failed to get the new instance name"))
-			}
-		}
-
-		// Extract the name of the instance
-		fields := strings.Split(instances[0], "/")
-		fmt.Printf(i18n.G("Instance name is: %s")+"\n", fields[len(fields)-1])
-	}
-
 	// Start the instance if needed
 	if start {
 		req := api.InstanceStatePut{
-			Action: string(shared.Start),
+			Action: string(instance.Start),
 		}
 
 		op, err := dest.UpdateInstanceState(destName, req, "")

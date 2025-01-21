@@ -7,11 +7,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/client"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/internal/instance"
+	"github.com/lxc/incus/v6/shared/api"
 )
 
 type cmdPublish struct {
@@ -39,6 +39,18 @@ func (c *cmdPublish) Command() *cobra.Command {
 	cmd.Flags().StringVar(&c.flagCompressionAlgorithm, "compression", "", i18n.G("Compression algorithm to use (`none` for uncompressed)"))
 	cmd.Flags().StringVar(&c.flagExpiresAt, "expire", "", i18n.G("Image expiration date (format: rfc3339)")+"``")
 	cmd.Flags().BoolVar(&c.flagReuse, "reuse", false, i18n.G("If the image alias already exists, delete and create a new one"))
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpInstancesAndSnapshots(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpRemotes(toComplete, false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -96,7 +108,7 @@ func (c *cmdPublish) Run(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if !shared.IsSnapshot(cName) {
+	if !instance.IsSnapshot(cName) {
 		ct, etag, err := s.GetInstance(cName)
 		if err != nil {
 			return err
@@ -126,7 +138,7 @@ func (c *cmdPublish) Run(cmd *cobra.Command, args []string) error {
 
 			// Stop the instance.
 			req := api.InstanceStatePut{
-				Action:  string(shared.Stop),
+				Action:  string(instance.Stop),
 				Timeout: -1,
 				Force:   true,
 			}
@@ -143,7 +155,7 @@ func (c *cmdPublish) Run(cmd *cobra.Command, args []string) error {
 
 			// Start the instance back up on exit.
 			defer func() {
-				req.Action = string(shared.Start)
+				req.Action = string(instance.Start)
 				op, err = s.UpdateInstanceState(cName, req, "")
 				if err != nil {
 					return
@@ -209,7 +221,7 @@ func (c *cmdPublish) Run(cmd *cobra.Command, args []string) error {
 
 	req.Properties = properties
 
-	if shared.IsSnapshot(cName) {
+	if instance.IsSnapshot(cName) {
 		req.Source.Type = "snapshot"
 	} else if !s.HasExtension("instances") {
 		req.Source.Type = "container"
@@ -222,7 +234,7 @@ func (c *cmdPublish) Run(cmd *cobra.Command, args []string) error {
 	if c.flagExpiresAt != "" {
 		expiresAt, err := time.Parse(time.RFC3339, c.flagExpiresAt)
 		if err != nil {
-			return fmt.Errorf("Invalid expiration date: %w", err)
+			return fmt.Errorf(i18n.G("Invalid expiration date: %w"), err)
 		}
 
 		req.ExpiresAt = expiresAt
@@ -301,40 +313,10 @@ func (c *cmdPublish) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Delete images if necessary
-	if c.flagReuse && len(existingAliases) > 0 {
-		visitedImages := make(map[string]interface{})
-		for _, alias := range existingAliases {
-			image, _, _ := d.GetImage(alias.Target)
-
-			// If the image has already been visited then continue
-			if image != nil {
-				_, found := visitedImages[image.Fingerprint]
-				if found {
-					continue
-				}
-
-				visitedImages[image.Fingerprint] = nil
-			}
-
-			// An image can have multiple aliases. If an image being published
-			// reuses all the aliases from an existing image then that existing image is removed.
-			// In other case only specific aliases should be removed. E.g.
-			// 1. If image with 'foo' and 'bar' aliases already exists and new image is published
-			//    with aliases 'foo' and 'bar' (and flag '--reuse'). Old image should be removed.
-			// 2. If image with 'foo' and 'bar' aliases already exists and new image is published
-			//    with alias 'foo' (and flag '--reuse'). Old image should be kept with alias 'bar'
-			//    and new image will have 'foo' alias.
-			if image != nil && IsAliasesSubset(image.Aliases, aliases) {
-				op, err := d.DeleteImage(alias.Target)
-				if err != nil {
-					return err
-				}
-
-				err = op.Wait()
-				if err != nil {
-					return err
-				}
-			}
+	if c.flagReuse {
+		err = deleteImagesByAliases(d, aliases)
+		if err != nil {
+			return err
 		}
 	}
 

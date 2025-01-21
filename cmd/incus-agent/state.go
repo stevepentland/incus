@@ -3,17 +3,21 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/lxc/incus/incusd/response"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	"github.com/lxc/incus/shared/logger"
+	"github.com/lxc/incus/v6/internal/linux"
+	"github.com/lxc/incus/v6/internal/server/response"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/logger"
+	"github.com/lxc/incus/v6/shared/osarch"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 var stateCmd = APIEndpoint{
@@ -39,6 +43,7 @@ func renderState() *api.InstanceState {
 		Network:   networkState(),
 		Pid:       1,
 		Processes: processesState(),
+		OSInfo:    osState(),
 	}
 }
 
@@ -47,7 +52,7 @@ func cpuState() api.InstanceStateCPU {
 	var err error
 	cpu := api.InstanceStateCPU{}
 
-	if shared.PathExists("/sys/fs/cgroup/cpuacct/cpuacct.usage") {
+	if util.PathExists("/sys/fs/cgroup/cpuacct/cpuacct.usage") {
 		// CPU usage in seconds
 		value, err = os.ReadFile("/sys/fs/cgroup/cpuacct/cpuacct.usage")
 		if err != nil {
@@ -64,7 +69,7 @@ func cpuState() api.InstanceStateCPU {
 		cpu.Usage = valueInt
 
 		return cpu
-	} else if shared.PathExists("/sys/fs/cgroup/cpu.stat") {
+	} else if util.PathExists("/sys/fs/cgroup/cpu.stat") {
 		stats, err := os.ReadFile("/sys/fs/cgroup/cpu.stat")
 		if err != nil {
 			cpu.Usage = -1
@@ -118,7 +123,7 @@ func memoryState() api.InstanceStateMemory {
 func networkState() map[string]api.InstanceStateNetwork {
 	result := map[string]api.InstanceStateNetwork{}
 
-	ifs, err := net.Interfaces()
+	ifs, err := linux.NetlinkInterfaces()
 	if err != nil {
 		logger.Errorf("Failed to retrieve network interfaces: %v", err)
 		return result
@@ -175,9 +180,7 @@ func networkState() map[string]api.InstanceStateNetwork {
 		}
 
 		// Addresses
-		addrs, _ := iface.Addrs()
-
-		for _, addr := range addrs {
+		for _, addr := range iface.Addresses {
 			addressFields := strings.Split(addr.String(), "/")
 
 			networkAddress := api.InstanceStateNetworkAddress{
@@ -241,4 +244,40 @@ func processesState() int64 {
 	}
 
 	return int64(len(pids))
+}
+
+func osState() *api.InstanceStateOSInfo {
+	osInfo := &api.InstanceStateOSInfo{}
+
+	// Get information about the OS.
+	lsbRelease, err := osarch.GetLSBRelease()
+	if err == nil {
+		osInfo.OS = lsbRelease["NAME"]
+		osInfo.OSVersion = lsbRelease["VERSION"]
+	}
+
+	// Get information about the kernel version.
+	uname, err := linux.Uname()
+	if err == nil {
+		osInfo.KernelVersion = uname.Release
+	}
+
+	// Get the hostname.
+	hostname, err := os.Hostname()
+	if err == nil {
+		osInfo.Hostname = hostname
+	}
+
+	// Get the FQDN. To avoid needing to run `hostname -f`, do a reverse host lookup for 127.0.1.1, and if found, return the first hostname as the FQDN.
+	ctx, cancel := context.WithTimeout(context.TODO(), 100*time.Millisecond)
+	defer cancel()
+
+	var r net.Resolver
+	fqdn, err := r.LookupAddr(ctx, "127.0.0.1")
+	if err == nil && len(fqdn) > 0 {
+		// Take the first returned hostname and trim the trailing dot.
+		osInfo.FQDN = strings.TrimSuffix(fqdn[0], ".")
+	}
+
+	return osInfo
 }

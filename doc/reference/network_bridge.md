@@ -1,21 +1,17 @@
----
-discourse: 7322
----
-
 (network-bridge)=
 # Bridge network
 
-As one of the possible network configuration types under LXD, LXD supports creating and managing network bridges.
+As one of the possible network configuration types under Incus, Incus supports creating and managing network bridges.
 <!-- Include start bridge intro -->
 A network bridge creates a virtual L2 Ethernet switch that instance NICs can connect to, making it possible for them to communicate with each other and the host.
-LXD bridges can leverage underlying native Linux bridges and Open vSwitch.
+Incus bridges can leverage underlying native Linux bridges and Open vSwitch.
 <!-- Include end bridge intro -->
 
 The `bridge` network type allows to create an L2 bridge that connects the instances that use it together into a single network L2 segment.
-Bridges created by LXD are managed, which means that in addition to creating the bridge interface itself, LXD also sets up a local `dnsmasq` process to provide DHCP, IPv6 route announcements and DNS services to the network.
+Bridges created by Incus are managed, which means that in addition to creating the bridge interface itself, Incus also sets up a local `dnsmasq` process to provide DHCP, IPv6 route announcements and DNS services to the network.
 By default, it also performs NAT for the bridge.
 
-See {ref}`network-bridge-firewall` for instructions on how to configure your firewall to work with LXD bridge networks.
+See {ref}`network-bridge-firewall` for instructions on how to configure your firewall to work with Incus bridge networks.
 
 <!-- Include start MAC identifier note -->
 
@@ -43,7 +39,6 @@ The following configuration key namespaces are currently supported for the `brid
 - `bgp` (BGP peer configuration)
 - `bridge` (L2 interface configuration)
 - `dns` (DNS server and resolution configuration)
-- `fan` (configuration specific to the Ubuntu FAN overlay)
 - `ipv4` (L3 IPv4 configuration)
 - `ipv6` (L3 IPv6 configuration)
 - `security` (network ACL configuration)
@@ -68,17 +63,13 @@ Key                                  | Type      | Condition             | Defau
 `bridge.driver`                      | string    | -                     | `native`                  | Bridge driver: `native` or `openvswitch`
 `bridge.external_interfaces`         | string    | -                     | -                         | Comma-separated list of unconfigured network interfaces to include in the bridge
 `bridge.hwaddr`                      | string    | -                     | -                         | MAC address for the bridge
-`bridge.mode`                        | string    | -                     | `standard`                | Bridge operation mode: `standard` or `fan`
-`bridge.mtu`                         | integer   | -                     | `1500`                    | Bridge MTU (default varies if tunnel or fan setup)
-`dns.domain`                         | string    | -                     | `lxd`                     | Domain to advertise to DHCP clients and use for DNS resolution
-`dns.mode`                           | string    | -                     | `managed`                 | DNS registration mode: `none` for no DNS record, `managed` for LXD-generated static records or `dynamic` for client-generated records
+`bridge.mtu`                         | integer   | -                     | `1500`                    | Bridge MTU (default varies if tunnel in use)
+`dns.domain`                         | string    | -                     | `incus`                   | Domain to advertise to DHCP clients and use for DNS resolution
+`dns.mode`                           | string    | -                     | `managed`                 | DNS registration mode: `none` for no DNS record, `managed` for Incus-generated static records or `dynamic` for client-generated records
 `dns.search`                         | string    | -                     | -                         | Full comma-separated domain search list, defaulting to `dns.domain` value
 `dns.zone.forward`                   | string    | -                     | `managed`                 | Comma-separated list of DNS zone names for forward DNS records
 `dns.zone.reverse.ipv4`              | string    | -                     | `managed`                 | DNS zone name for IPv4 reverse DNS records
 `dns.zone.reverse.ipv6`              | string    | -                     | `managed`                 | DNS zone name for IPv6 reverse DNS records
-`fan.overlay_subnet`                 | string    | fan mode              | `240.0.0.0/8`             | Subnet to use as the overlay for the FAN (CIDR)
-`fan.type`                           | string    | fan mode              | `vxlan`                   | Tunneling type for the FAN: `vxlan` or `ipip`
-`fan.underlay_subnet`                | string    | fan mode              | `auto` (on create only)   | Subnet to use as the underlay for the FAN (use `auto` to use default gateway subnet) (CIDR)
 `ipv4.address`                       | string    | standard mode         | - (initial value on creation: `auto`) | IPv4 address for the bridge (use `none` to turn off IPv4 or `auto` to generate a new random unused subnet) (CIDR)
 `ipv4.dhcp`                          | bool      | IPv4 address          | `true`                    | Whether to allocate addresses using DHCP
 `ipv4.dhcp.expiry`                   | string    | IPv4 DHCP             | `1h`                      | When to expire DHCP leases
@@ -118,6 +109,12 @@ Key                                  | Type      | Condition             | Defau
 `tunnel.NAME.remote`                 | string    | `gre` or `vxlan`      | -                         | Remote address for the tunnel (not necessary for multicast `vxlan`)
 `tunnel.NAME.ttl`                    | integer   | `vxlan`               | `1`                       | Specific TTL to use for multicast routing topologies
 `user.*`                             | string    | -                     | -                         | User-provided free-form key/value pairs
+
+```{note}
+The `bridge.external_interfaces` option supports an extended format allowing the creation of missing VLAN interfaces.
+The extended format is `<interfaceName>/<parentInterfaceName>/<vlanId>`.
+When the external interface is added to the list with the extended format, the system will automatically create the interface upon the network's creation and subsequently delete it when the network is terminated. The system verifies that the `<interfaceName>` does not already exist. If the interface name is in use with a different parent or VLAN ID, or if the creation of the interface is unsuccessful, the system will revert with an error message.
+```
 
 (network-bridge-features)=
 ## Supported features

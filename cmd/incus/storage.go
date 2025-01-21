@@ -12,18 +12,22 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
 
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/termios"
-	"github.com/lxc/incus/shared/units"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/termios"
+	"github.com/lxc/incus/v6/shared/units"
 )
 
 type cmdStorage struct {
 	global *cmdGlobal
 
 	flagTarget string
+}
+
+type storageColumn struct {
+	Name string
+	Data func(api.StoragePool) string
 }
 
 func (c *cmdStorage) Command() *cobra.Command {
@@ -87,6 +91,8 @@ func (c *cmdStorage) Command() *cobra.Command {
 type cmdStorageCreate struct {
 	global  *cmdGlobal
 	storage *cmdStorage
+
+	flagDescription string
 }
 
 func (c *cmdStorageCreate) Command() *cobra.Command {
@@ -95,18 +101,54 @@ func (c *cmdStorageCreate) Command() *cobra.Command {
 	cmd.Short = i18n.G("Create storage pools")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
 		`Create storage pools`))
+	cmd.Example = cli.FormatSection("", i18n.G(`incus create storage s1 dir
+
+incus create storage s1 dir < config.yaml
+    Create a storage pool using the content of config.yaml.
+	`))
 
 	cmd.Flags().StringVar(&c.storage.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
+	cmd.Flags().StringVar(&c.flagDescription, "description", "", i18n.G("Storage pool description")+"``")
+
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpRemotes(toComplete, false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
 
 func (c *cmdStorageCreate) Run(cmd *cobra.Command, args []string) error {
+	var stdinData api.StoragePoolPut
+
 	// Quick checks.
 	exit, err := c.global.CheckArgs(cmd, args, 2, -1)
 	if exit {
 		return err
+	}
+
+	// Require a proper driver name.
+	if strings.Contains(args[1], "=") {
+		_ = cmd.Help()
+		return fmt.Errorf(i18n.G("Invalid number of arguments"))
+	}
+
+	// If stdin isn't a terminal, read text from it
+	if !termios.IsTerminal(getStdinFd()) {
+		contents, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return err
+		}
+
+		err = yaml.Unmarshal(contents, &stdinData)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Parse remote
@@ -119,10 +161,17 @@ func (c *cmdStorageCreate) Run(cmd *cobra.Command, args []string) error {
 	client := resource.server
 
 	// Create the new storage pool entry
-	pool := api.StoragePoolsPost{}
+	pool := api.StoragePoolsPost{StoragePoolPut: stdinData}
 	pool.Name = resource.name
-	pool.Config = map[string]string{}
 	pool.Driver = args[1]
+
+	if c.flagDescription != "" {
+		pool.Description = c.flagDescription
+	}
+
+	if pool.Config == nil {
+		pool.Config = map[string]string{}
+	}
 
 	for i := 2; i < len(args); i++ {
 		entry := strings.SplitN(args[i], "=", 2)
@@ -171,6 +220,14 @@ func (c *cmdStorageDelete) Command() *cobra.Command {
 		`Delete storage pools`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpStoragePools(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -224,6 +281,14 @@ func (c *cmdStorageEdit) Command() *cobra.Command {
     Update a storage pool using the content of pool.yaml.`))
 
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpStoragePools(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -292,7 +357,7 @@ func (c *cmdStorageEdit) Run(cmd *cobra.Command, args []string) error {
 	}
 
 	// Spawn the editor
-	content, err := shared.TextEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
+	content, err := textEditor("", []byte(c.helpTemplate()+"\n\n"+string(data)))
 	if err != nil {
 		return err
 	}
@@ -315,7 +380,7 @@ func (c *cmdStorageEdit) Run(cmd *cobra.Command, args []string) error {
 				return err
 			}
 
-			content, err = shared.TextEditor("", content)
+			content, err = textEditor("", content)
 			if err != nil {
 				return err
 			}
@@ -347,6 +412,18 @@ func (c *cmdStorageGet) Command() *cobra.Command {
 	cmd.Flags().StringVar(&c.storage.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Get the key as a storage property"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpStoragePools(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpStoragePoolConfigs(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -417,6 +494,14 @@ func (c *cmdStorageInfo) Command() *cobra.Command {
 	cmd.Flags().BoolVar(&c.flagBytes, "bytes", false, i18n.G("Show the used and free space in bytes"))
 	cmd.Flags().StringVar(&c.storage.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpStoragePools(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -575,7 +660,8 @@ type cmdStorageList struct {
 	global  *cmdGlobal
 	storage *cmdStorage
 
-	flagFormat string
+	flagFormat  string
+	flagColumns string
 }
 
 func (c *cmdStorageList) Command() *cobra.Command {
@@ -584,12 +670,104 @@ func (c *cmdStorageList) Command() *cobra.Command {
 	cmd.Aliases = []string{"ls"}
 	cmd.Short = i18n.G("List available storage pools")
 	cmd.Long = cli.FormatSection(i18n.G("Description"), i18n.G(
-		`List available storage pools`))
-	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G("Format (csv|json|table|yaml|compact)")+"``")
+		`List available storage pools
+
+Default column layout: nDSdus
+
+== Columns ==
+The -c option takes a comma separated list of arguments that control
+which instance attributes to output when displaying in table or csv
+format.
+
+Column arguments are either pre-defined shorthand chars (see below),
+or (extended) config keys.
+
+Commas between consecutive shorthand chars are optional.
+
+Pre-defined column shorthand chars:
+  n - Name
+  D - Driver
+  d - Description
+  S - Source
+  u - used by
+  s - state`))
+	cmd.Flags().StringVarP(&c.flagColumns, "columns", "c", defaultStorageColumns, i18n.G("Columns")+"``")
+
+	cmd.Flags().StringVarP(&c.flagFormat, "format", "f", "table", i18n.G(`Format (csv|json|table|yaml|compact), use suffix ",noheader" to disable headers and ",header" to enable it if missing, e.g. csv,header`)+"``")
+
+	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		return cli.ValidateFlagFormatForListOutput(cmd.Flag("format").Value.String())
+	}
 
 	cmd.RunE = c.Run
 
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpRemotes(toComplete, false)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
 	return cmd
+}
+
+const defaultStorageColumns = "nDdus"
+
+func (c *cmdStorageList) parseColumns() ([]storageColumn, error) {
+	columnsShorthandMap := map[rune]storageColumn{
+		'n': {i18n.G("NAME"), c.storageNameColumnData},
+		'D': {i18n.G("DRIVER"), c.driverColumnData},
+		'd': {i18n.G("DESCRIPTION"), c.descriptionColumnData},
+		'S': {i18n.G("SOURCE"), c.sourceColumnData},
+		'u': {i18n.G("USED BY"), c.usedByColumnData},
+		's': {i18n.G("STATE"), c.stateColumnData},
+	}
+
+	columnList := strings.Split(c.flagColumns, ",")
+
+	columns := []storageColumn{}
+
+	for _, columnEntry := range columnList {
+		if columnEntry == "" {
+			return nil, fmt.Errorf(i18n.G("Empty column entry (redundant, leading or trailing command) in '%s'"), c.flagColumns)
+		}
+
+		for _, columnRune := range columnEntry {
+			column, ok := columnsShorthandMap[columnRune]
+			if !ok {
+				return nil, fmt.Errorf(i18n.G("Unknown column shorthand char '%c' in '%s'"), columnRune, columnEntry)
+			}
+
+			columns = append(columns, column)
+		}
+	}
+
+	return columns, nil
+}
+
+func (c *cmdStorageList) storageNameColumnData(storage api.StoragePool) string {
+	return storage.Name
+}
+
+func (c *cmdStorageList) driverColumnData(storage api.StoragePool) string {
+	return storage.Driver
+}
+
+func (c *cmdStorageList) descriptionColumnData(storage api.StoragePool) string {
+	return storage.Description
+}
+
+func (c *cmdStorageList) sourceColumnData(storage api.StoragePool) string {
+	return storage.Config["source"]
+}
+
+func (c *cmdStorageList) usedByColumnData(storage api.StoragePool) string {
+	return fmt.Sprintf("%d", len(storage.UsedBy))
+}
+
+func (c *cmdStorageList) stateColumnData(storage api.StoragePool) string {
+	return strings.ToUpper(storage.Status)
 }
 
 func (c *cmdStorageList) Run(cmd *cobra.Command, args []string) error {
@@ -618,36 +796,30 @@ func (c *cmdStorageList) Run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Parse column flags.
+	columns, err := c.parseColumns()
+	if err != nil {
+		return err
+	}
+
 	data := [][]string{}
 	for _, pool := range pools {
-		usedby := strconv.Itoa(len(pool.UsedBy))
-		details := []string{pool.Name, pool.Driver}
-		if !resource.server.IsClustered() {
-			details = append(details, pool.Config["source"])
+		line := []string{}
+		for _, column := range columns {
+			line = append(line, column.Data(pool))
 		}
 
-		details = append(details, pool.Description)
-		details = append(details, usedby)
-		details = append(details, strings.ToUpper(pool.Status))
-		data = append(data, details)
+		data = append(data, line)
 	}
 
 	sort.Sort(cli.SortColumnsNaturally(data))
 
-	header := []string{
-		i18n.G("NAME"),
-		i18n.G("DRIVER"),
+	header := []string{}
+	for _, column := range columns {
+		header = append(header, column.Name)
 	}
 
-	if !resource.server.IsClustered() {
-		header = append(header, i18n.G("SOURCE"))
-	}
-
-	header = append(header, i18n.G("DESCRIPTION"))
-	header = append(header, i18n.G("USED BY"))
-	header = append(header, i18n.G("STATE"))
-
-	return cli.RenderTable(c.flagFormat, header, data, pools)
+	return cli.RenderTable(os.Stdout, c.flagFormat, header, data, pools)
 }
 
 // Set.
@@ -671,6 +843,14 @@ For backward compatibility, a single configuration key may still be set with:
 	cmd.Flags().StringVar(&c.storage.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Set the key as a storage property"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpStoragePools(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -728,6 +908,10 @@ func (c *cmdStorageSet) Run(cmd *cobra.Command, args []string) error {
 			}
 		}
 	} else {
+		if writable.Config == nil {
+			writable.Config = make(map[string]string)
+		}
+
 		// Update the volume config keys.
 		for k, v := range keys {
 			writable.Config[k] = v
@@ -760,6 +944,14 @@ func (c *cmdStorageShow) Command() *cobra.Command {
 	cmd.Flags().BoolVar(&c.flagResources, "resources", false, i18n.G("Show the resources available to the storage pool"))
 	cmd.Flags().StringVar(&c.storage.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpStoragePools(toComplete)
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }
@@ -846,6 +1038,18 @@ func (c *cmdStorageUnset) Command() *cobra.Command {
 	cmd.Flags().StringVar(&c.storage.flagTarget, "target", "", i18n.G("Cluster member name")+"``")
 	cmd.Flags().BoolVarP(&c.flagIsProperty, "property", "p", false, i18n.G("Unset the key as a storage property"))
 	cmd.RunE = c.Run
+
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return c.global.cmpStoragePools(toComplete)
+		}
+
+		if len(args) == 1 {
+			return c.global.cmpStoragePoolConfigs(args[0])
+		}
+
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 
 	return cmd
 }

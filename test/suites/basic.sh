@@ -34,6 +34,11 @@ test_basic_usage() {
   incus image alias list | grep -qv foo  # the old name is gone
   incus image alias delete bar
 
+  # Test an alias with description
+  incus image alias create baz "${sum}" --description "Test description"
+  incus image alias list | grep -q 'Test description'
+  incus image alias delete baz
+
   # Test image list output formats (table & json)
   incus image list --format table | grep -q testimage
   incus image list --format json \
@@ -151,7 +156,7 @@ test_basic_usage() {
   incus publish bar --alias=foo-image --alias=foo-image2
   incus launch testimage baz
   # change the container filesystem so the resulting image is different
-  incus exec baz touch /somefile
+  incus exec baz -- touch /somefile
   incus stop baz --force
   # publishing another image with same alias should fail
   ! incus publish baz --alias=foo-image || false
@@ -173,7 +178,7 @@ test_basic_usage() {
   incus publish bar --alias=foo-image --alias=foo-image2
   incus launch testimage baz
   # change the container filesystem so the resulting image is different
-  incus exec baz touch /somefile
+  incus exec baz -- touch /somefile
   incus stop baz --force
   # publishing another image with same aliases
   incus publish baz --alias=foo-image --alias=foo-image2 --reuse
@@ -228,11 +233,11 @@ test_basic_usage() {
   curl -k -s --cert "${INCUS_CONF}/client3.crt" --key "${INCUS_CONF}/client3.key" -X GET "https://${INCUS_ADDR}/1.0/images" | grep -F "/1.0/images/"
   incus image delete foo-image2
 
-  # Test invalid container names
+  # Test invalid instance names
   ! incus init testimage -abc || false
   ! incus init testimage abc- || false
   ! incus init testimage 1234 || false
-  ! incus init testimage 12test || false
+  ! incus init testimage foo.bar || false
   ! incus init testimage a_b_c || false
   ! incus init testimage aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa || false
 
@@ -278,7 +283,7 @@ test_basic_usage() {
   incus delete bar
 
   # incus delete should also delete all snapshots of bar
-  [ ! -d "${INCUS_DIR}/snapshots/bar" ]
+  [ ! -d "${INCUS_DIR}/containers-snapshots/bar" ]
 
   # Test randomly named container creation
   incus launch testimage
@@ -373,16 +378,16 @@ test_basic_usage() {
   kill_incus "${INCUS_ACTIVATION_DIR}"
 
   # Create and start a container
-  incus launch testimage foo
+  incus launch testimage foo --description "Test container"
   incus list | grep foo | grep RUNNING
   incus stop foo --force
 
   # cycle it a few times
   incus start foo
-  mac1=$(incus exec foo cat /sys/class/net/eth0/address)
+  mac1=$(incus exec foo -- cat /sys/class/net/eth0/address)
   incus stop foo --force
   incus start foo
-  mac2=$(incus exec foo cat /sys/class/net/eth0/address)
+  mac2=$(incus exec foo -- cat /sys/class/net/eth0/address)
 
   if [ -n "${mac1}" ] && [ -n "${mac2}" ] && [ "${mac1}" != "${mac2}" ]; then
     echo "==> MAC addresses didn't match across restarts (${mac1} vs ${mac2})"
@@ -414,9 +419,9 @@ test_basic_usage() {
   [ "$(incus exec foo --user 1234 --group 5678 --cwd /blah -- pwd)" = "/blah" ] || false
 
   # check that we can set the environment
-  incus exec foo pwd | grep /root
-  incus exec --env BEST_BAND=meshuggah foo env | grep meshuggah
-  incus exec foo ip link show | grep eth0
+  incus exec foo -- pwd | grep /root
+  incus exec --env BEST_BAND=meshuggah foo -- env | grep meshuggah
+  incus exec foo -- ip link show | grep eth0
 
   # check that we can get the return code for a non- wait-for-websocket exec
   op=$(my_curl -X POST "https://${INCUS_ADDR}/1.0/instances/foo/exec" -d '{"command": ["echo", "test"], "environment": {}, "wait-for-websocket": false, "interactive": false}' | jq -r .operation)
@@ -426,11 +431,11 @@ test_basic_usage() {
   echo abc > "${INCUS_DIR}/in"
 
   incus file push "${INCUS_DIR}/in" foo/root/
-  incus exec foo /bin/cat /root/in | grep abc
+  incus exec foo -- /bin/cat /root/in | grep -xF abc
   incus exec foo -- /bin/rm -f root/in
 
   incus file push "${INCUS_DIR}/in" foo/root/in1
-  incus exec foo /bin/cat /root/in1 | grep abc
+  incus exec foo -- /bin/cat /root/in1 | grep -xF abc
   incus exec foo -- /bin/rm -f root/in1
 
   # test incus file edit doesn't change target file's owner and permissions
@@ -444,10 +449,14 @@ test_basic_usage() {
   # make sure stdin is chowned to our container root uid (Issue #590)
   [ -t 0 ] && [ -t 1 ] && incus exec foo -- chown 1000:1000 /proc/self/fd/0
 
-  echo foo | incus exec foo tee /tmp/foo
+  echo foo | incus exec foo -- tee /tmp/foo
+
+  # test exec with/without "--" separator
+  incus exec foo -- true
+  incus exec foo true
 
   # Detect regressions/hangs in exec
-  sum=$(ps aux | tee "${INCUS_DIR}/out" | incus exec foo md5sum | cut -d' ' -f1)
+  sum=$(ps aux | tee "${INCUS_DIR}/out" | incus exec foo -- md5sum | cut -d' ' -f1)
   [ "${sum}" = "$(md5sum "${INCUS_DIR}/out" | cut -d' ' -f1)" ]
   rm "${INCUS_DIR}/out"
 
@@ -568,7 +577,7 @@ test_basic_usage() {
         REBOOTED="true"
         break
       else
-        incus exec foo reboot || true  # Signal to running old init processs to reboot if not rebooted yet.
+        incus exec foo -- reboot || true  # Signal to running old init process to reboot if not rebooted yet.
       fi
     fi
 
@@ -639,15 +648,14 @@ test_basic_usage() {
 
   # Test rebuilding an instance with a new image.
   incus init c1 --empty
-  incus remote add l1 "${INCUS_ADDR}" --accept-certificate --password foo
-  incus rebuild l1:testimage c1
+  incus rebuild testimage c1
   incus start c1
   incus delete c1 -f
-  incus remote remove l1
 
   # Test rebuilding an instance with an empty file system.
   incus init testimage c1
   incus rebuild c1 --empty
+  ! incus config show c1 | grep -q 'image.*' || false
   incus delete c1 -f
 
   # Test assigning an empty profile (with no root disk device) to an instance.
@@ -655,5 +663,32 @@ test_basic_usage() {
   incus profile create foo
   ! incus profile assign c1 foo || false
   incus profile delete foo
+  incus delete -f c1
+
+  # Multiple ephemeral instances delete
+  incus launch testimage c1
+  incus launch testimage c2
+  incus launch testimage c3
+
+  incus delete -f c1 c2 c3
+  remaining_instances="$(incus list --format csv)"
+  [ -z "${remaining_instances}" ]
+
+  # Test autorestart mechanism
+  incus launch testimage c1 -c boot.autorestart=true
+
+  for _ in $(seq 10); do
+    PID=$(incus info c1 | awk '/^PID/ {print $2}')
+    kill -9 "${PID}"
+    sleep 3
+  done
+
+  [ "$(incus list -cs -fcsv c1)" = "RUNNING" ] || false
+
+  PID=$(incus info c1 | awk '/^PID/ {print $2}')
+  kill -9 "${PID}"
+  sleep 3
+
+  [ "$(incus list -cs -fcsv c1)" = "STOPPED" ] || false
   incus delete -f c1
 }

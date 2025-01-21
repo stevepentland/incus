@@ -18,13 +18,16 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/sys/unix"
 
-	"github.com/lxc/incus/incusd/db/operationtype"
-	"github.com/lxc/incus/incusd/operations"
-	"github.com/lxc/incus/incusd/response"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	"github.com/lxc/incus/shared/logger"
-	"github.com/lxc/incus/shared/ws"
+	"github.com/lxc/incus/v6/internal/jmap"
+	"github.com/lxc/incus/v6/internal/linux"
+	"github.com/lxc/incus/v6/internal/server/db/operationtype"
+	"github.com/lxc/incus/v6/internal/server/operations"
+	"github.com/lxc/incus/v6/internal/server/response"
+	internalUtil "github.com/lxc/incus/v6/internal/util"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/logger"
+	"github.com/lxc/incus/v6/shared/util"
+	"github.com/lxc/incus/v6/shared/ws"
 )
 
 const execWSControl = -1
@@ -70,7 +73,7 @@ func execPost(d *Daemon, r *http.Request) response.Response {
 		env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	}
 
-	if shared.PathExists("/snap/bin") {
+	if util.PathExists("/snap/bin") {
 		env["PATH"] = fmt.Sprintf("%s:/snap/bin", env["PATH"])
 	}
 
@@ -118,7 +121,7 @@ func execPost(d *Daemon, r *http.Request) response.Response {
 	ws.interactive = post.Interactive
 
 	for i := range ws.conns {
-		ws.fds[i], err = shared.RandomCryptoString()
+		ws.fds[i], err = internalUtil.RandomHexString(32)
 		if err != nil {
 			return response.InternalError(err)
 		}
@@ -164,7 +167,7 @@ type execWs struct {
 }
 
 func (s *execWs) Metadata() any {
-	fds := shared.Jmap{}
+	fds := jmap.Map{}
 	for fd, secret := range s.fds {
 		if fd == execWSControl {
 			fds[api.SecretNameControl] = secret
@@ -173,7 +176,7 @@ func (s *execWs) Metadata() any {
 		}
 	}
 
-	return shared.Jmap{
+	return jmap.Map{
 		"fds":         fds,
 		"command":     s.command,
 		"environment": s.env,
@@ -255,7 +258,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 	if s.interactive {
 		ttys = make([]*os.File, 1)
 		ptys = make([]*os.File, 1)
-		ptys[0], ttys[0], err = shared.OpenPty(int64(s.uid), int64(s.gid))
+		ptys[0], ttys[0], err = linux.OpenPty(int64(s.uid), int64(s.gid))
 		if err != nil {
 			return err
 		}
@@ -265,7 +268,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 		stderr = ttys[0]
 
 		if s.width > 0 && s.height > 0 {
-			_ = shared.SetSize(int(ptys[0].Fd()), s.width, s.height)
+			_ = linux.SetPtySize(int(ptys[0].Fd()), s.width, s.height)
 		}
 	} else {
 		ttys = make([]*os.File, 3)
@@ -282,12 +285,12 @@ func (s *execWs) Do(op *operations.Operation) error {
 		stderr = ttys[execWSStderr]
 	}
 
-	attachedChildIsDead := make(chan struct{})
+	waitAttachedChildIsDead, markAttachedChildIsDead := context.WithCancel(context.Background())
 	var wgEOF sync.WaitGroup
 
 	finisher := func(cmdResult int, cmdErr error) error {
-		// Close this before closing the control connection so control handler can detect command ending.
-		close(attachedChildIsDead)
+		// Cancel this before closing the control connection so control handler can detect command ending.
+		markAttachedChildIsDead()
 
 		for _, tty := range ttys {
 			_ = tty.Close()
@@ -307,7 +310,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 			_ = pty.Close()
 		}
 
-		metadata := shared.Jmap{"return": cmdResult}
+		metadata := jmap.Map{"return": cmdResult}
 		err = op.UpdateMetadata(metadata)
 		if err != nil {
 			return err
@@ -357,7 +360,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 	if err != nil {
 		exitStatus := -1
 
-		if errors.Is(err, exec.ErrNotFound) || os.IsNotExist(err) {
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
 			exitStatus = 127
 		} else if errors.Is(err, fs.ErrPermission) {
 			exitStatus = 126
@@ -384,10 +387,8 @@ func (s *execWs) Do(op *operations.Operation) error {
 			mt, r, err := conn.NextReader()
 			if err != nil || mt == websocket.CloseMessage {
 				// Check if command process has finished normally, if so, no need to kill it.
-				select {
-				case <-attachedChildIsDead:
+				if waitAttachedChildIsDead.Err() != nil {
 					return
-				default:
 				}
 
 				if mt == websocket.CloseMessage {
@@ -409,10 +410,8 @@ func (s *execWs) Do(op *operations.Operation) error {
 			buf, err := io.ReadAll(r)
 			if err != nil {
 				// Check if command process has finished normally, if so, no need to kill it.
-				select {
-				case <-attachedChildIsDead:
+				if waitAttachedChildIsDead.Err() != nil {
 					return
-				default:
 				}
 
 				l.Warn("Failed reading control websocket message, killing command", logger.Ctx{"err": err})
@@ -440,7 +439,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 					continue
 				}
 
-				err = shared.SetSize(int(ptys[0].Fd()), winchWidth, winchHeight)
+				err = linux.SetPtySize(int(ptys[0].Fd()), winchWidth, winchHeight)
 				if err != nil {
 					l.Debug("Failed to set window size", logger.Ctx{"err": err, "width": winchWidth, "height": winchHeight})
 					continue
@@ -469,7 +468,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 			conn := s.conns[0]
 			s.connsLock.Unlock()
 
-			readDone, writeDone := ws.Mirror(context.Background(), conn, ptys[0])
+			readDone, writeDone := ws.Mirror(conn, linux.NewExecWrapper(waitAttachedChildIsDead, ptys[0]))
 
 			<-readDone
 			<-writeDone
@@ -487,14 +486,14 @@ func (s *execWs) Do(op *operations.Operation) error {
 					conn := s.conns[i]
 					s.connsLock.Unlock()
 
-					<-ws.MirrorWrite(context.Background(), conn, ttys[i])
+					<-ws.MirrorWrite(conn, ttys[i])
 					_ = ttys[i].Close()
 				} else {
 					s.connsLock.Lock()
 					conn := s.conns[i]
 					s.connsLock.Unlock()
 
-					<-ws.MirrorRead(context.Background(), conn, ptys[i])
+					<-ws.MirrorRead(conn, ptys[i])
 					_ = ptys[i].Close()
 					wgEOF.Done()
 				}
@@ -502,7 +501,7 @@ func (s *execWs) Do(op *operations.Operation) error {
 		}
 	}
 
-	exitStatus, err := shared.ExitStatus(cmd.Wait())
+	exitStatus, err := linux.ExitStatus(cmd.Wait())
 
 	l.Debug("Instance process stopped", logger.Ctx{"err": err, "exitStatus": exitStatus})
 	return finisher(exitStatus, nil)

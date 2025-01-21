@@ -4,17 +4,22 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"reflect"
 	"sort"
 	"strings"
 
-	"github.com/lxc/incus/client"
-	config "github.com/lxc/incus/internal/cliconfig"
-	"github.com/lxc/incus/shared"
-	"github.com/lxc/incus/shared/api"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/termios"
+	incus "github.com/lxc/incus/v6/client"
+	"github.com/lxc/incus/v6/internal/i18n"
+	"github.com/lxc/incus/v6/internal/instance"
+	"github.com/lxc/incus/v6/shared/api"
+	config "github.com/lxc/incus/v6/shared/cliconfig"
+	"github.com/lxc/incus/v6/shared/revert"
+	"github.com/lxc/incus/v6/shared/termios"
 )
+
+// Date layout to be used throughout the client.
+const dateLayout = "2006/01/02 15:04 MST"
 
 // Batch operations.
 type batchResult struct {
@@ -202,6 +207,60 @@ func GetExistingAliases(aliases []string, allAliases []api.ImageAliasesEntry) []
 	return existing
 }
 
+// deleteImagesByAliases deletes images based on provided aliases. E.g.
+// aliases=[a1], image aliases=[a1] - image will be deleted
+// aliases=[a1, a2], image aliases=[a1] - image will be deleted
+// aliases=[a1], image aliases=[a1, a2] - image will be preserved.
+func deleteImagesByAliases(client incus.InstanceServer, aliases []api.ImageAlias) error {
+	existingAliases, err := GetCommonAliases(client, aliases...)
+	if err != nil {
+		return fmt.Errorf(i18n.G("Error retrieving aliases: %w"), err)
+	}
+
+	// Nothing to do. Just return.
+	if len(existingAliases) == 0 {
+		return nil
+	}
+
+	// Delete images if necessary
+	visitedImages := make(map[string]any)
+	for _, alias := range existingAliases {
+		image, _, _ := client.GetImage(alias.Target)
+
+		// If the image has already been visited then continue
+		if image != nil {
+			_, found := visitedImages[image.Fingerprint]
+			if found {
+				continue
+			}
+
+			visitedImages[image.Fingerprint] = nil
+		}
+
+		// An image can have multiple aliases. If an image being published
+		// reuses all the aliases from an existing image then that existing image is removed.
+		// In other case only specific aliases should be removed. E.g.
+		// 1. If image with 'foo' and 'bar' aliases already exists and new image is published
+		//    with aliases 'foo' and 'bar'. Old image should be removed.
+		// 2. If image with 'foo' and 'bar' aliases already exists and new image is published
+		//    with alias 'foo'. Old image should be kept with alias 'bar'
+		//    and new image will have 'foo' alias.
+		if image != nil && IsAliasesSubset(image.Aliases, aliases) {
+			op, err := client.DeleteImage(alias.Target)
+			if err != nil {
+				return err
+			}
+
+			err = op.Wait()
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 func getConfig(args ...string) (map[string]string, error) {
 	if len(args) == 2 && !strings.Contains(args[0], "=") {
 		if args[1] == "-" && !termios.IsTerminal(getStdinFd()) {
@@ -239,6 +298,36 @@ func getConfig(args ...string) (map[string]string, error) {
 	return values, nil
 }
 
+func readEnvironmentFile(path string) (map[string]string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf(i18n.G("Can't read from environment file: %w"), err)
+	}
+
+	// Split the file into lines.
+	lines := strings.Split(string(content), "\n")
+
+	// Create a map to store the key value pairs.
+	envMap := make(map[string]string)
+
+	// Iterate over the lines.
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		pieces := strings.SplitN(line, "=", 2)
+		value := ""
+		if len(pieces) > 1 {
+			value = pieces[1]
+		}
+
+		envMap[pieces[0]] = value
+	}
+
+	return envMap, nil
+}
+
 func usage(name string, args ...string) string {
 	if len(args) == 0 {
 		return name
@@ -251,7 +340,7 @@ func usage(name string, args ...string) string {
 func instancesExist(resources []remoteResource) error {
 	for _, resource := range resources {
 		// Handle snapshots.
-		if shared.IsSnapshot(resource.name) {
+		if instance.IsSnapshot(resource.name) {
 			parent, snap, _ := api.GetParentAndSnapshotName(resource.name)
 
 			_, _, err := resource.server.GetInstanceSnapshot(parent, snap)
@@ -365,8 +454,8 @@ func getImgInfo(d incus.InstanceServer, conf *config.Config, imgRemote string, i
 		}
 	}
 
-	// Optimisation for simplestreams
-	if conf.Remotes[imgRemote].Protocol == "simplestreams" {
+	// Optimisation for public image servers.
+	if conf.Remotes[imgRemote].Protocol != "incus" {
 		imgInfo = &api.Image{}
 		imgInfo.Fingerprint = imageRef
 		imgInfo.Public = true
@@ -387,4 +476,109 @@ func getImgInfo(d incus.InstanceServer, conf *config.Config, imgRemote string, i
 	}
 
 	return imgRemoteServer, imgInfo, nil
+}
+
+// Spawn the editor with a temporary YAML file for editing configs.
+func textEditor(inPath string, inContent []byte) ([]byte, error) {
+	var f *os.File
+	var err error
+	var path string
+
+	// Detect the text editor to use
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+		if editor == "" {
+			for _, p := range []string{"editor", "vi", "emacs", "nano"} {
+				_, err := exec.LookPath(p)
+				if err == nil {
+					editor = p
+					break
+				}
+			}
+			if editor == "" {
+				return []byte{}, fmt.Errorf(i18n.G("No text editor found, please set the EDITOR environment variable"))
+			}
+		}
+	}
+
+	if inPath == "" {
+		// If provided input, create a new file
+		f, err = os.CreateTemp("", "incus_editor_")
+		if err != nil {
+			return []byte{}, err
+		}
+
+		revert := revert.New()
+		defer revert.Fail()
+		revert.Add(func() {
+			_ = f.Close()
+			_ = os.Remove(f.Name())
+		})
+
+		err = os.Chmod(f.Name(), 0600)
+		if err != nil {
+			return []byte{}, err
+		}
+
+		_, err = f.Write(inContent)
+		if err != nil {
+			return []byte{}, err
+		}
+
+		err = f.Close()
+		if err != nil {
+			return []byte{}, err
+		}
+
+		path = fmt.Sprintf("%s.yaml", f.Name())
+		err = os.Rename(f.Name(), path)
+		if err != nil {
+			return []byte{}, err
+		}
+
+		revert.Success()
+		revert.Add(func() { _ = os.Remove(path) })
+	} else {
+		path = inPath
+	}
+
+	cmdParts := strings.Fields(editor)
+	cmd := exec.Command(cmdParts[0], append(cmdParts[1:], path)...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err = cmd.Run()
+	if err != nil {
+		return []byte{}, err
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	return content, nil
+}
+
+// removeElementsFromSlice returns a slice equivalent to removing the given elements from the given list.
+// Elements not present in the list are ignored.
+func removeElementsFromSlice[T comparable](list []T, elements ...T) []T {
+	for i := len(elements) - 1; i >= 0; i-- {
+		element := elements[i]
+		match := false
+		for j := len(list) - 1; j >= 0; j-- {
+			if element == list[j] {
+				match = true
+				list = append(list[:j], list[j+1:]...)
+				break
+			}
+		}
+
+		if match {
+			elements = append(elements[:i], elements[i+1:]...)
+		}
+	}
+
+	return list
 }

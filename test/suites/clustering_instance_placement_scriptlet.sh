@@ -28,14 +28,14 @@ test_clustering_instance_placement_scriptlet() {
   INCUS_TWO_DIR=$(mktemp -d -p "${TEST_DIR}" XXX)
   chmod +x "${INCUS_TWO_DIR}"
   ns2="${prefix}2"
-  spawn_incus_and_join_cluster "${ns2}" "${bridge}" "${cert}" 2 1 "${INCUS_TWO_DIR}" "${poolDriver}"
+  spawn_incus_and_join_cluster "${ns2}" "${bridge}" "${cert}" 2 1 "${INCUS_TWO_DIR}" "${INCUS_ONE_DIR}" "${poolDriver}"
 
   # Spawn a third node
   setup_clustering_netns 3
   INCUS_THREE_DIR=$(mktemp -d -p "${TEST_DIR}" XXX)
   chmod +x "${INCUS_THREE_DIR}"
   ns3="${prefix}3"
-  spawn_incus_and_join_cluster "${ns3}" "${bridge}" "${cert}" 3 1 "${INCUS_THREE_DIR}" "${poolDriver}"
+  spawn_incus_and_join_cluster "${ns3}" "${bridge}" "${cert}" 3 1 "${INCUS_THREE_DIR}" "${INCUS_ONE_DIR}" "${poolDriver}"
 
   INCUS_DIR="${INCUS_ONE_DIR}" ensure_import_testimage
 
@@ -74,8 +74,9 @@ def instance_placement(request, candidate_members):
                 log_info("instance placement member resources: ", get_cluster_member_resources(member.server_name))
                 log_info("instance placement member state: ", get_cluster_member_state(member.server_name))
 
-        # Set statically target to 2nd member.
-        set_target(candidate_members[1].server_name)
+        # Set statically target to 2nd member (alphabetical).
+        candidate_names = sorted([candidate.server_name for candidate in candidate_members])
+        set_target(candidate_names[1])
 
         return # No error.
 EOF
@@ -120,7 +121,7 @@ EOF
   ! INCUS_DIR="${INCUS_ONE_DIR}" incus init testimage c1 || false
 
   # Set instance placement scriptlet to one that sets an invalid cluster member target.
-  # Check that instance placement uses Incus's built in logic instead (as if setTarget hadn't been called at all).
+  # Confirm that we get a placement error.
   cat << EOF | incus config set instances.placement.scriptlet=-
 def instance_placement(request, candidate_members):
         # Set invalid member target.
@@ -130,8 +131,11 @@ def instance_placement(request, candidate_members):
         return
 EOF
 
-  INCUS_DIR="${INCUS_ONE_DIR}" incus init testimage c1 -c cluster.evacuate=migrate
-  INCUS_DIR="${INCUS_ONE_DIR}" incus info c1 | grep -q "Location: node1"
+  ! INCUS_DIR="${INCUS_ONE_DIR}" incus init testimage c1 -c cluster.evacuate=migrate || false
+
+  # Create an instance
+  incus config unset instances.placement.scriptlet
+  INCUS_DIR="${INCUS_ONE_DIR}" incus init testimage c1 -c cluster.evacuate=migrate --target node1
 
   # Set basic instance placement scriptlet that statically targets to 3rd member.
   cat << EOF | incus config set instances.placement.scriptlet=-
@@ -148,7 +152,8 @@ def instance_placement(request, candidate_members):
         # Set statically target to 3rd member.
         # Note: We expect the candidate members to not contain the member being evacuated, and thus the 3rd
         # member is the 2nd entry in the candidate_members list now.
-        set_target(candidate_members[1].server_name)
+        candidate_names = sorted([candidate.server_name for candidate in candidate_members])
+        set_target(candidate_names[1])
 
         return # No error.
 EOF
@@ -164,9 +169,9 @@ EOF
   INCUS_DIR="${INCUS_ONE_DIR}" incus storage delete data
 
   # Shut down cluster
-  INCUS_DIR="${INCUS_ONE_DIR}" incusd shutdown
-  INCUS_DIR="${INCUS_TWO_DIR}" incusd shutdown
-  INCUS_DIR="${INCUS_THREE_DIR}" incusd shutdown
+  INCUS_DIR="${INCUS_ONE_DIR}" incus admin shutdown
+  INCUS_DIR="${INCUS_TWO_DIR}" incus admin shutdown
+  INCUS_DIR="${INCUS_THREE_DIR}" incus admin shutdown
   sleep 0.5
   rm -f "${INCUS_ONE_DIR}/unix.socket"
   rm -f "${INCUS_TWO_DIR}/unix.socket"

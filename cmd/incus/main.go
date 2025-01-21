@@ -1,24 +1,31 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/user"
 	"path"
-	"path/filepath"
+	"slices"
 
+	"github.com/kballard/go-shellquote"
 	"github.com/spf13/cobra"
 
-	"github.com/lxc/incus/client"
-	config "github.com/lxc/incus/internal/cliconfig"
-	"github.com/lxc/incus/shared"
-	cli "github.com/lxc/incus/shared/cmd"
-	"github.com/lxc/incus/shared/i18n"
-	"github.com/lxc/incus/shared/logger"
-	"github.com/lxc/incus/shared/version"
+	incus "github.com/lxc/incus/v6/client"
+	cli "github.com/lxc/incus/v6/internal/cmd"
+	"github.com/lxc/incus/v6/internal/i18n"
+	internalUtil "github.com/lxc/incus/v6/internal/util"
+	"github.com/lxc/incus/v6/internal/version"
+	"github.com/lxc/incus/v6/shared/api"
+	"github.com/lxc/incus/v6/shared/ask"
+	config "github.com/lxc/incus/v6/shared/cliconfig"
+	"github.com/lxc/incus/v6/shared/logger"
+	"github.com/lxc/incus/v6/shared/util"
 )
 
 type cmdGlobal struct {
+	asker ask.Asker
+
 	conf     *config.Config
 	confPath string
 	cmd      *cobra.Command
@@ -64,14 +71,28 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 `
 }
 
-func main() {
-	// Process aliases
-	err := execIfAliases()
+func aliases() []string {
+	c, err := config.LoadConfig("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return nil
 	}
 
+	aliases := make([]string, 0, len(defaultAliases)+len(c.Aliases))
+
+	// Add default aliases
+	for alias := range defaultAliases {
+		aliases = append(aliases, alias)
+	}
+
+	// Add user-defined aliases
+	for alias := range c.Aliases {
+		aliases = append(aliases, alias)
+	}
+
+	return aliases
+}
+
+func createApp() (*cobra.Command, *cmdGlobal) {
 	// Setup the parser
 	app := &cobra.Command{}
 	app.Use = "incus"
@@ -80,13 +101,17 @@ func main() {
 		`Command line client for Incus
 
 All of Incus's features can be driven through the various commands below.
-For help with any of those, simply call them with --help.`))
+For help with any of those, simply call them with --help.
+
+Custom commands can be defined through aliases, use "incus alias" to control those.`))
 	app.SilenceUsage = true
 	app.SilenceErrors = true
-	app.CompletionOptions = cobra.CompletionOptions{DisableDefaultCmd: true}
+	app.CompletionOptions = cobra.CompletionOptions{HiddenDefaultCmd: true}
+	app.ValidArgs = aliases()
 
 	// Global flags
-	globalCmd := cmdGlobal{cmd: app}
+	globalCmd := cmdGlobal{cmd: app, asker: ask.NewAsker(bufio.NewReader(os.Stdin))}
+
 	app.PersistentFlags().BoolVar(&globalCmd.flagVersion, "version", false, i18n.G("Print version number"))
 	app.PersistentFlags().BoolVarP(&globalCmd.flagHelp, "help", "h", false, i18n.G("Print help"))
 	app.PersistentFlags().BoolVar(&globalCmd.flagForceLocal, "force-local", false, i18n.G("Force using the local unix socket"))
@@ -108,6 +133,10 @@ For help with any of those, simply call them with --help.`))
 	aliasCmd := cmdAlias{global: &globalCmd}
 	app.AddCommand(aliasCmd.Command())
 
+	// admin sub-command
+	adminCmd := cmdAdmin{global: &globalCmd}
+	app.AddCommand(adminCmd.Command())
+
 	// cluster sub-command
 	clusterCmd := cmdCluster{global: &globalCmd}
 	app.AddCommand(clusterCmd.Command())
@@ -119,6 +148,10 @@ For help with any of those, simply call them with --help.`))
 	// console sub-command
 	consoleCmd := cmdConsole{global: &globalCmd}
 	app.AddCommand(consoleCmd.Command())
+
+	// create sub-command
+	createCmd := cmdCreate{global: &globalCmd}
+	app.AddCommand(createCmd.Command())
 
 	// copy sub-command
 	copyCmd := cmdCopy{global: &globalCmd}
@@ -152,12 +185,8 @@ For help with any of those, simply call them with --help.`))
 	imageCmd := cmdImage{global: &globalCmd}
 	app.AddCommand(imageCmd.Command())
 
-	// init sub-command
-	initCmd := cmdInit{global: &globalCmd}
-	app.AddCommand(initCmd.Command())
-
 	// launch sub-command
-	launchCmd := cmdLaunch{global: &globalCmd, init: &initCmd}
+	launchCmd := cmdLaunch{global: &globalCmd, init: &createCmd}
 	app.AddCommand(launchCmd.Command())
 
 	// list sub-command
@@ -196,7 +225,7 @@ For help with any of those, simply call them with --help.`))
 	profileCmd := cmdProfile{global: &globalCmd}
 	app.AddCommand(profileCmd.Command())
 
-	// profile sub-command
+	// project sub-command
 	projectCmd := cmdProject{global: &globalCmd}
 	app.AddCommand(projectCmd.Command())
 
@@ -220,6 +249,10 @@ For help with any of those, simply call them with --help.`))
 	remoteCmd := cmdRemote{global: &globalCmd}
 	app.AddCommand(remoteCmd.Command())
 
+	// resume sub-command
+	resumeCmd := cmdResume{global: &globalCmd}
+	app.AddCommand(resumeCmd.Command())
+
 	// snapshot sub-command
 	snapshotCmd := cmdSnapshot{global: &globalCmd}
 	app.AddCommand(snapshotCmd.Command())
@@ -240,9 +273,17 @@ For help with any of those, simply call them with --help.`))
 	versionCmd := cmdVersion{global: &globalCmd}
 	app.AddCommand(versionCmd.Command())
 
+	// top sub-command
+	topCmd := cmdTop{global: &globalCmd}
+	app.AddCommand(topCmd.Command())
+
 	// warning sub-command
 	warningCmd := cmdWarning{global: &globalCmd}
 	app.AddCommand(warningCmd.Command())
+
+	// webui sub-command
+	webuiCmd := cmdWebui{global: &globalCmd}
+	app.AddCommand(webuiCmd.Command())
 
 	// Get help command
 	app.InitDefaultHelpCmd()
@@ -258,18 +299,36 @@ For help with any of those, simply call them with --help.`))
 	app.Flags().BoolVar(&globalCmd.flagHelpAll, "all", false, i18n.G("Show less common commands"))
 	help.Flags().BoolVar(&globalCmd.flagHelpAll, "all", false, i18n.G("Show less common commands"))
 
-	// Deal with --all flag and --sub-commands flag
-	err = app.ParseFlags(os.Args[1:])
+	return app, &globalCmd
+}
+
+func main() {
+	app, globalCmd := createApp()
+
+	// Deal with --all and --sub-commands flags as well as process aliases.
+	err := app.ParseFlags(os.Args[1:])
 	if err == nil {
 		if globalCmd.flagHelpAll {
 			// Show all commands
 			for _, cmd := range app.Commands() {
+				if cmd.Name() == "completion" {
+					continue
+				}
+
 				cmd.Hidden = false
 			}
 		}
+
 		if globalCmd.flagSubCmds {
 			app.SetUsageTemplate(usageTemplateSubCmds())
 		}
+	}
+
+	// Process aliases
+	err = execIfAliases(app)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Run the main command and handle errors
@@ -285,7 +344,11 @@ If you already added a remote server, make it the default with "incus remote swi
 		}
 
 		// Default error handling
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if os.Getenv("INCUS_ALIASES") == "1" {
+			fmt.Fprintf(os.Stderr, i18n.G("Error while executing alias expansion: %s\n"), shellquote.Join(os.Args...))
+		}
+
+		fmt.Fprintf(os.Stderr, i18n.G("Error: %v\n"), err)
 
 		// If custom exit status not set, use default error status.
 		if globalCmd.ret == 0 {
@@ -306,91 +369,106 @@ func (c *cmdGlobal) PreRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Figure out the config directory and config path
-	var configDir string
-	if os.Getenv("INCUS_CONF") != "" {
-		configDir = os.Getenv("INCUS_CONF")
-	} else if os.Getenv("HOME") != "" {
-		configDir = path.Join(os.Getenv("HOME"), ".config", "incus")
+	// Figure out a potential cache path.
+	var cachePath string
+	if os.Getenv("INCUS_CACHE") != "" {
+		cachePath = os.Getenv("INCUS_CACHE")
+	} else if os.Getenv("HOME") != "" && util.PathExists(os.Getenv("HOME")) {
+		cachePath = path.Join(os.Getenv("HOME"), ".cache", "incus")
 	} else {
-		user, err := user.Current()
+		currentUser, err := user.Current()
 		if err != nil {
 			return err
 		}
 
-		configDir = path.Join(user.HomeDir, ".config", "incus")
-	}
-
-	c.confPath = os.ExpandEnv(path.Join(configDir, "config.yml"))
-
-	// Load the configuration
-	if c.flagForceLocal {
-		c.conf = config.NewConfig("", true)
-	} else if shared.PathExists(c.confPath) {
-		c.conf, err = config.LoadConfig(c.confPath)
-		if err != nil {
-			return err
+		if util.PathExists(currentUser.HomeDir) {
+			cachePath = path.Join(currentUser.HomeDir, ".cache", "incus")
 		}
-	} else {
-		c.conf = config.NewConfig(filepath.Dir(c.confPath), true)
 	}
+
+	if cachePath != "" {
+		err := os.MkdirAll(cachePath, 0700)
+		if err != nil && !os.IsExist(err) {
+			cachePath = ""
+		}
+	}
+
+	c.conf, err = config.LoadConfig("")
+	if err != nil {
+		return fmt.Errorf(i18n.G("Failed to load configuration: %s"), err)
+	}
+
+	// If no config dir could be found, treat as if --force-local was passed.
+	if c.conf.ConfigDir == "" {
+		c.flagForceLocal = true
+	}
+
+	c.confPath = c.conf.ConfigPath("config.yml")
+
+	// Set cache directory in config.
+	c.conf.CacheDir = cachePath
 
 	// Override the project
 	if c.flagProject != "" {
 		c.conf.ProjectOverride = c.flagProject
+	} else {
+		c.conf.ProjectOverride = os.Getenv("INCUS_PROJECT")
 	}
 
 	// Setup password helper
 	c.conf.PromptPassword = func(filename string) (string, error) {
-		return cli.AskPasswordOnce(fmt.Sprintf(i18n.G("Password for %s: "), filename)), nil
+		return c.asker.AskPasswordOnce(fmt.Sprintf(i18n.G("Password for %s: "), filename)), nil
 	}
 
 	// If the user is running a command that may attempt to connect to the local daemon
 	// and this is the first time the client has been run by the user, then check to see
 	// if the server has been properly configured.  Don't display the message if the var path
 	// does not exist (server missing), as the user may be targeting a remote daemon.
-	if !c.flagForceLocal && shared.PathExists(shared.VarPath("")) && !shared.PathExists(c.confPath) {
+	if !c.flagForceLocal && !util.PathExists(c.confPath) {
 		// Create the config dir so that we don't get in here again for this user.
 		err = os.MkdirAll(c.conf.ConfigDir, 0750)
 		if err != nil {
 			return err
 		}
 
-		// Attempt to connect to the local server
-		runInit := true
-		d, err := incus.ConnectIncusUnix("", nil)
-		if err == nil {
-			// Check if server is initialized.
-			info, _, err := d.GetServer()
-			if err == nil && info.Environment.Storage != "" {
-				runInit = false
-			}
-
-			// Detect usable project.
-			names, err := d.GetProjectNames()
+		// Handle local servers.
+		if util.PathExists(internalUtil.VarPath("")) {
+			// Attempt to connect to the local server
+			runInit := true
+			d, err := incus.ConnectIncusUnix("", nil)
 			if err == nil {
-				if len(names) == 1 && names[0] != "default" {
-					remote := c.conf.Remotes["local"]
-					remote.Project = names[0]
-					c.conf.Remotes["local"] = remote
+				// Check if server is initialized.
+				info, _, err := d.GetServer()
+				if err == nil && info.Environment.Storage != "" {
+					runInit = false
+				}
+
+				// Detect usable project.
+				names, err := d.GetProjectNames()
+				if err == nil {
+					if len(names) == 1 && names[0] != api.ProjectDefaultName {
+						remote := c.conf.Remotes["local"]
+						remote.Project = names[0]
+						c.conf.Remotes["local"] = remote
+					}
 				}
 			}
-		}
 
-		flush := false
-		if runInit {
-			fmt.Fprintf(os.Stderr, i18n.G("If this is your first time running Incus on this machine, you should also run: incus admin init")+"\n")
-			flush = true
-		}
+			flush := false
+			if runInit && (cmd.Name() != "init" || cmd.Parent() == nil || cmd.Parent().Name() != "admin") {
+				fmt.Fprintf(os.Stderr, i18n.G("If this is your first time running Incus on this machine, you should also run: incus admin init")+"\n")
+				flush = true
+			}
 
-		if !shared.StringInSlice(cmd.Name(), []string{"init", "launch"}) {
-			fmt.Fprintf(os.Stderr, i18n.G(`To start your first container, try: incus launch images:ubuntu/22.04
+			if !slices.Contains([]string{"admin", "create", "launch"}, cmd.Name()) && (cmd.Parent() == nil || cmd.Parent().Name() != "admin") {
+				fmt.Fprintf(os.Stderr, i18n.G(`To start your first container, try: incus launch images:ubuntu/22.04
 Or for a virtual machine: incus launch images:ubuntu/22.04 --vm`)+"\n")
-			flush = true
-		}
+				flush = true
+			}
 
-		if flush {
-			fmt.Fprintf(os.Stderr, "\n")
+			if flush {
+				fmt.Fprintf(os.Stderr, "\n")
+			}
 		}
 
 		// And save the initial configuration
@@ -413,7 +491,7 @@ Or for a virtual machine: incus launch images:ubuntu/22.04 --vm`)+"\n")
 }
 
 func (c *cmdGlobal) PostRun(cmd *cobra.Command, args []string) error {
-	if c.conf != nil && shared.PathExists(c.confPath) {
+	if c.conf != nil && util.PathExists(c.confPath) {
 		// Save OIDC tokens on exit
 		c.conf.SaveOIDCTokens()
 	}

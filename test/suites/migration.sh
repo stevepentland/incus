@@ -13,9 +13,12 @@ test_migration() {
   # workaround for kernel/criu
   umount /sys/kernel/debug >/dev/null 2>&1 || true
 
+  token="$(incus config trust add foo -q)"
   # shellcheck disable=2153
-  incus_remote remote add l1 "${INCUS_ADDR}" --accept-certificate --password foo
-  incus_remote remote add l2 "${INCUS2_ADDR}" --accept-certificate --password foo
+  incus_remote remote add l1 "${INCUS_ADDR}" --accept-certificate --token "${token}"
+
+  token="$(INCUS_DIR=${INCUS2_DIR} incus config trust add foo -q)"
+  incus_remote remote add l2 "${INCUS2_ADDR}" --accept-certificate --token "${token}"
 
   migration "$INCUS2_DIR"
 
@@ -108,7 +111,7 @@ migration() {
   [ ! -d "${INCUS_DIR}/containers/nonlive" ]
   # FIXME: make this backend agnostic
   if [ "$incus2_backend" = "dir" ]; then
-    [ -d "${incus2_dir}/snapshots/nonlive/snap0/rootfs/bin" ]
+    [ -d "${incus2_dir}/containers-snapshots/nonlive/snap0/rootfs/bin" ]
   fi
 
   incus_remote copy l2:nonlive l1:nonlive2 --mode=push
@@ -123,7 +126,7 @@ migration() {
 
   # FIXME: make this backend agnostic
   if [ "$incus_backend" = "dir" ]; then
-    [ -d "${INCUS_DIR}/snapshots/nonlive2/snap0/rootfs/bin" ]
+    [ -d "${INCUS_DIR}/containers-snapshots/nonlive2/snap0/rootfs/bin" ]
   fi
 
   incus_remote copy l1:nonlive2/snap0 l2:nonlive3 --mode=relay
@@ -292,8 +295,48 @@ migration() {
   incus_remote copy l1:c1 l2:c2 --refresh
   incus_remote start l2:c2
   incus_remote file pull l2:c2/root/testfile1 .
+  [ "$(cat testfile1)" = "test" ]
   rm testfile1
   incus_remote stop -f l2:c2
+
+  # Change the files modification time by adding one nanosecond.
+  # Perform the change on the test runner since the busybox instances `touch` doesn't support setting nanoseconds.
+  incus_remote start l1:c1
+  c1_pid="$(incus_remote query l1:/1.0/instances/c1?recursion=1 | jq -r .state.pid)"
+  mtime_old="$(stat -c %y "/proc/${c1_pid}/root/root/testfile1")"
+  mtime_old_ns="$(date -d "$mtime_old" +%N | sed 's/^0*//')"
+
+  # Ensure the final nanoseconds are padded with zeros to create a valid format.
+  mtime_new_ns="$(printf "%09d\n" "$((mtime_old_ns+1))")"
+  mtime_new="$(date -d "$mtime_old" "+%Y-%m-%d %H:%M:%S.${mtime_new_ns} %z")"
+  incus_remote stop -f l1:c1
+
+  # Before setting the new mtime create a local copy too.
+  incus_remote copy l1:c1 l1:c2
+
+  # Change the modification time.
+  incus_remote start l1:c1
+  c1_pid="$(incus_remote query l1:/1.0/instances/c1?recursion=1 | jq -r .state.pid)"
+  touch -m -d "$mtime_new" "/proc/${c1_pid}/root/root/testfile1"
+  incus_remote stop -f l1:c1
+
+  # Starting from rsync 3.1.3 it should discover the change of +1 nanosecond.
+  # Check if the file got refreshed to a different remote.
+  incus_remote copy l1:c1 l2:c2 --refresh
+  incus_remote start l1:c1 l2:c2
+  c1_pid="$(incus_remote query l1:/1.0/instances/c1?recursion=1 | jq -r .state.pid)"
+  c2_pid="$(incus_remote query l2:/1.0/instances/c2?recursion=1 | jq -r .state.pid)"
+  [ "$(stat "/proc/${c1_pid}/root/root/testfile1" -c %y)" = "$(stat "/proc/${c2_pid}/root/root/testfile1" -c %y)" ]
+  incus_remote stop -f l1:c1 l2:c2
+
+  # Check if the file got refreshed locally.
+  incus_remote copy l1:c1 l1:c2 --refresh
+  incus_remote start l1:c1 l1:c2
+  c1_pid="$(incus_remote query l1:/1.0/instances/c1?recursion=1 | jq -r .state.pid)"
+  c2_pid="$(incus_remote query l1:/1.0/instances/c2?recursion=1 | jq -r .state.pid)"
+  [ "$(stat "/proc/${c1_pid}/root/root/testfile1" -c %y)" = "$(stat "/proc/${c2_pid}/root/root/testfile1" -c %y)" ]
+  incus_remote rm -f l1:c2
+  incus_remote stop -f l1:c1
 
   # This will create snapshot c1/snap0 with test device and expiry date.
   incus_remote config device add l1:c1 testsnapdev none
@@ -460,9 +503,9 @@ migration() {
   incus_remote start l1:c1
   incus_remote delete l1:c1 -f
 
-  incus_remote snapshot delete l2:c1/snap0
-  incus_remote snapshot delete l2:c1/snap1
-  incus_remote snapshot delete l2:c1/snap2
+  incus_remote snapshot delete l2:c1 snap0
+  incus_remote snapshot delete l2:c1 snap1
+  incus_remote snapshot delete l2:c1 snap2
   incus_remote copy l2:c1 l1:
   incus_remote start l1:c1
   incus_remote delete l1:c1 -f
@@ -524,7 +567,7 @@ migration() {
   incus_remote snapshot create l1:c1
 
   # Delete first snapshot from target
-  incus_remote snapshot rm l2:c1/snap0
+  incus_remote snapshot rm l2:c1 snap0
 
   # Refresh
   incus_remote copy l1:c1 l2:c1 --refresh
@@ -566,7 +609,7 @@ migration() {
   incus_remote rm -f l2:c1
 
   # migrate ISO custom volumes
-  truncate -s 25MiB foo.iso
+  truncate -s 8MiB foo.iso
   incus storage volume import l1:"${pool}" ./foo.iso iso1
   incus storage volume copy l1:"${pool}"/iso1 l2:"${remote_pool}"/iso1
 

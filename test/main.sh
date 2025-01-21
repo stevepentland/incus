@@ -83,12 +83,24 @@ cleanup() {
     read -r _
   fi
 
+  echo ""
+  echo "df -h output:"
+  df -h
+
+  if [ "${TEST_RESULT}" != "success" ]; then
+    # dmesg may contain oops, IO errors, crashes, etc
+    echo "::group::dmesg logs"
+    journalctl --quiet --no-hostname --no-pager --boot=0 --lines=100 --dmesg
+    echo "::endgroup::"
+  fi
+
   if [ -n "${GITHUB_ACTIONS:-}" ]; then
     echo "==> Skipping cleanup (GitHub Action runner detected)"
   else
     echo "==> Cleaning up"
 
     umount -l "${TEST_DIR}/dev"
+    shutdown_openfga
     cleanup_incus "$TEST_DIR"
   fi
 
@@ -195,11 +207,14 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_database_no_disk_space "database out of disk space"
     run_test test_sql "SQL"
     run_test test_tls_restrictions "TLS restrictions"
+    run_test test_oidc "OpenID Connect"
+    run_test test_openfga "OpenFGA"
     run_test test_certificate_edit "Certificate edit"
     run_test test_basic_usage "basic usage"
     run_test test_remote_url "remote url handling"
     run_test test_remote_admin "remote administration"
     run_test test_remote_usage "remote usage"
+    run_test test_tls_jwt "JWT authentication"
 fi
 
 if [ "${1:-"all"}" != "standalone" ]; then
@@ -218,7 +233,6 @@ if [ "${1:-"all"}" != "standalone" ]; then
     run_test test_clustering_update_cert_reversion "clustering update cert reversion"
     run_test test_clustering_address "clustering address"
     run_test test_clustering_image_replication "clustering image replication"
-    run_test test_clustering_dns "clustering DNS"
     run_test test_clustering_recover "clustering recovery"
     run_test test_clustering_handover "clustering handover"
     run_test test_clustering_rebalance "clustering rebalance"
@@ -235,6 +249,7 @@ if [ "${1:-"all"}" != "standalone" ]; then
     run_test test_clustering_groups "clustering groups"
     run_test test_clustering_events "clustering events"
     run_test test_clustering_uuid "clustering uuid"
+    run_test test_clustering_openfga "clustering OpenFGA"
 fi
 
 if [ "${1:-"all"}" != "cluster" ]; then
@@ -271,6 +286,8 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_container_devices_unix_char "container devices - unix-char"
     run_test test_container_devices_unix_block "container devices - unix-block"
     run_test test_container_devices_tpm "container devices - tpm"
+    run_test test_container_move "container server-side move"
+    run_test test_container_oci "OCI containers"
     run_test test_container_syscall_interception "container syscall interception"
     run_test test_security "security features"
     run_test test_security_protection "container protection"
@@ -279,10 +296,12 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_image_auto_update "image auto-update"
     run_test test_image_prefer_cached "image prefer cached"
     run_test test_image_import_dir "import image from directory"
+    run_test test_image_import_with_reuse "import image with reuse flag"
     run_test test_image_refresh "image refresh"
     run_test test_image_acl "image acl"
     run_test test_cloud_init "cloud-init"
     run_test test_exec "exec"
+    run_test test_exec_exit_code "exec exit code"
     run_test test_concurrent_exec "concurrent exec"
     run_test test_concurrent "concurrent startup"
     run_test test_snapshots "container snapshots"
@@ -312,19 +331,22 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_fdleak "fd leak"
     run_test test_storage "storage"
     run_test test_storage_volume_snapshots "storage volume snapshots"
-    run_test test_init_auto "incusd init auto"
-    run_test test_init_interactive "incusd init interactive"
-    run_test test_init_preseed "incusd init preseed"
+    run_test test_init_auto "incus admin init auto"
+    run_test test_init_interactive "incus admin init interactive"
+    run_test test_init_preseed "incus admin init preseed"
     run_test test_storage_profiles "storage profiles"
     run_test test_container_recover "container recover"
     run_test test_bucket_recover "bucket recover"
+    run_test test_get_operations "test_get_operations"
     run_test test_storage_volume_attach "attaching storage volumes"
     run_test test_storage_driver_btrfs "btrfs storage driver"
     run_test test_storage_driver_ceph "ceph storage driver"
     run_test test_storage_driver_cephfs "cephfs storage driver"
     run_test test_storage_driver_zfs "zfs storage driver"
     run_test test_storage_buckets "storage buckets"
+    run_test test_storage_bucket_export "storage buckets export and import"
     run_test test_storage_volume_import "storage volume import"
+    run_test test_storage_volume_initial_config "storage volume initial configuration"
     run_test test_resources "resources"
     run_test test_kernel_limits "kernel limits"
     run_test test_console "console"
@@ -334,9 +356,11 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_backup_export "backup export"
     run_test test_backup_rename "backup rename"
     run_test test_backup_volume_export "backup volume export"
+    run_test test_backup_export_import_instance_only "backup export and import instance only"
     run_test test_backup_volume_rename_delete "backup volume rename and delete"
     run_test test_backup_different_instance_uuid "backup instance and check instance UUIDs"
     run_test test_backup_volume_expiry "backup volume expiry"
+    run_test test_backup_export_import_recover "backup export, import, and recovery"
     run_test test_container_local_cross_pool_handling "container local cross pool handling"
     run_test test_incremental_copy "incremental container copy"
     run_test test_profiles_project_default "profiles in default project"
@@ -347,6 +371,8 @@ if [ "${1:-"all"}" != "cluster" ]; then
     run_test test_warnings "Warnings"
     run_test test_metrics "Metrics"
     run_test test_storage_volume_recover "Recover storage volumes"
+    run_test test_syslog_socket "Syslog socket"
+    run_test test_incus_user "incus-user"
 fi
 
 # shellcheck disable=SC2034
